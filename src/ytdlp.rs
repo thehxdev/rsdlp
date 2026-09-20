@@ -1,31 +1,28 @@
+use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, Result};
 use tokio::process::Command;
-use tokio::sync::oneshot::{channel, Sender};
-use serde_json::Value;
+use tokio::sync::watch;
+
+const BINARY: &str = "yt-dlp";
 
 #[derive(Debug)]
 pub struct Ytdlp {
-    binary_path: String,
     url: String,
-    canceler: Option<Sender<()>>,
+    canceler: Option<watch::Sender<()>>,
 }
 
 impl Ytdlp {
     pub fn new(url: &str) -> Self {
-        // TODO: Curretly the yt-dlp binary path is hardcoded. Make it configurable.
         Self {
-            binary_path: String::from("yt-dlp"),
             url: String::from(url),
             canceler: None,
         }
     }
 
     pub async fn get_media_info(&self) -> Result<Option<Value>> {
-        use serde_json::Value;
-
-        let output = Command::new(&self.binary_path)
-            .args(&["-q", "-J", &self.url])
+        let output = Command::new(BINARY)
+            .args(["-q", "-J", &self.url])
             .stderr(Stdio::inherit())
             .output()
             .await?;
@@ -44,7 +41,7 @@ impl Ytdlp {
         ytdlp_args.extend_from_slice(extra_args);
         ytdlp_args.push(&self.url);
 
-        let mut child = Command::new(&self.binary_path)
+        let mut child = Command::new(BINARY)
             .args(&ytdlp_args)
             .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
@@ -52,17 +49,19 @@ impl Ytdlp {
             .process_group(0)
             .spawn()?;
 
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .expect("Failed to get yt-dlp child process stdout");
 
-        let (send, recv) = channel::<()>();
+        let (send, mut recv) = watch::channel(());
         let child_pid = child.id().unwrap() as i32;
         self.canceler = Some(send);
 
         tokio::spawn(async move {
             tokio::select! {
                 _ = child.wait() => {}
-                _ = recv => {
+                _ = recv.changed() => {
                     // NOTE: Currently I couldn't find a cross-platform way to kill a parent process
                     // and all of it's children. Crates like `process-wrap` are also broken and vibe
                     // coded slop. So I assume my target platform is Unix-like systems that support
@@ -76,7 +75,6 @@ impl Ytdlp {
                         _ = libc::kill(pgid, libc::SIGTERM);
                     }
                     _ = child.wait().await;
-                    // println!("yt-dlp process terminated with SIGTERM");
                 }
             }
         });
@@ -84,9 +82,12 @@ impl Ytdlp {
         Ok(stdout)
     }
 
+    pub fn cancel_handle(&self) -> Option<watch::Sender<()>> {
+        self.canceler.clone()
+    }
+
     pub fn terminate(&mut self) {
-        if self.canceler.is_some() {
-            let canceler = self.canceler.take().unwrap();
+        if let Some(canceler) = &self.canceler {
             _ = canceler.send(());
         }
     }

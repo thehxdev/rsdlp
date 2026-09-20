@@ -5,6 +5,5 @@ edition = "2024"
 
 [dependencies]
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync"] }
 libc = "0.2"
-# axum = "0.8"
