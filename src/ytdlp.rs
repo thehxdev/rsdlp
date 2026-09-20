@@ -40,7 +40,7 @@ impl Ytdlp {
         }
     }
 
-    pub fn start(&mut self, extra_args: &[&str]) -> Result<()> {
+    pub fn start_download(&mut self, extra_args: &[&str]) -> Result<()> {
         let mut ytdlp_args = vec!["-o", "-"];
         ytdlp_args.extend_from_slice(extra_args);
         ytdlp_args.push(&self.url);
@@ -49,7 +49,6 @@ impl Ytdlp {
             .args(&ytdlp_args)
             .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
-            .kill_on_drop(true)
             .process_group(0)
             .spawn()?;
 

@@ -24,7 +24,7 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Response {
     let mut ytdlp = ytdlp::Ytdlp::new(&form.url);
 
     ytdlp
-        .start(&["-S", "res:720"])
+        .start_download(&["-S", "res:720"])
         .expect("Failed to start download");
 
     let stream = tokio_util::io::ReaderStream::new(ytdlp);
