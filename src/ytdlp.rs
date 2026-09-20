@@ -1,7 +1,9 @@
 use serde_json::Value;
+use std::pin::Pin;
 use std::process::Stdio;
-use tokio::io::{AsyncReadExt, Result};
-use tokio::process::Command;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, Result};
+use tokio::process::{ChildStdout, Command};
 use tokio::sync::watch;
 
 const BINARY: &str = "yt-dlp";
@@ -9,6 +11,7 @@ const BINARY: &str = "yt-dlp";
 #[derive(Debug)]
 pub struct Ytdlp {
     url: String,
+    child_stdout: Option<ChildStdout>,
     canceler: Option<watch::Sender<()>>,
 }
 
@@ -16,11 +19,12 @@ impl Ytdlp {
     pub fn new(url: &str) -> Self {
         Self {
             url: String::from(url),
+            child_stdout: None,
             canceler: None,
         }
     }
 
-    pub async fn get_media_info(&self) -> Result<Option<Value>> {
+    pub async fn get_info(&self) -> Result<Option<Value>> {
         let output = Command::new(BINARY)
             .args(["-q", "-J", &self.url])
             .stderr(Stdio::inherit())
@@ -36,7 +40,7 @@ impl Ytdlp {
         }
     }
 
-    pub fn start(&mut self, extra_args: &[&str]) -> Result<impl AsyncReadExt + 'static> {
+    pub fn start(&mut self, extra_args: &[&str]) -> Result<()> {
         let mut ytdlp_args = vec!["-o", "-"];
         ytdlp_args.extend_from_slice(extra_args);
         ytdlp_args.push(&self.url);
@@ -53,6 +57,7 @@ impl Ytdlp {
             .stdout
             .take()
             .expect("Failed to get yt-dlp child process stdout");
+        self.child_stdout = Some(stdout);
 
         let (send, mut recv) = watch::channel(());
         let child_pid = child.id().unwrap() as i32;
@@ -79,7 +84,7 @@ impl Ytdlp {
             }
         });
 
-        Ok(stdout)
+        Ok(())
     }
 
     pub fn cancel_handle(&self) -> Option<watch::Sender<()>> {
@@ -96,5 +101,20 @@ impl Ytdlp {
 impl Drop for Ytdlp {
     fn drop(&mut self) {
         self.terminate();
+        // println!("ytdlp instance dropped and it's process group terminated");
+    }
+}
+
+impl AsyncRead for Ytdlp {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if let Some(child_stdout) = &mut self.child_stdout {
+            Pin::new(child_stdout).poll_read(cx, buf)
+        } else {
+            Poll::Pending
+        }
     }
 }
