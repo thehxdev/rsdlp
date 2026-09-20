@@ -8,6 +8,7 @@ use serde_json::Value;
 pub struct Ytdlp {
     binary_path: String,
     url: String,
+    canceler: Option<Sender<()>>,
 }
 
 impl Ytdlp {
@@ -16,11 +17,13 @@ impl Ytdlp {
         Self {
             binary_path: String::from("yt-dlp"),
             url: String::from(url),
+            canceler: None,
         }
     }
 
     pub async fn get_media_info(&self) -> Result<Option<Value>> {
         use serde_json::Value;
+
         let output = Command::new(&self.binary_path)
             .args(&["-q", "-J", &self.url])
             .stderr(Stdio::inherit())
@@ -36,7 +39,7 @@ impl Ytdlp {
         }
     }
 
-    pub fn start(&mut self, extra_args: &[&str]) -> Result<(impl AsyncReadExt + 'static, Sender<()>)> {
+    pub fn start(&mut self, extra_args: &[&str]) -> Result<impl AsyncReadExt + 'static> {
         let mut ytdlp_args = vec!["-o", "-"];
         ytdlp_args.extend_from_slice(extra_args);
         ytdlp_args.push(&self.url);
@@ -54,6 +57,7 @@ impl Ytdlp {
 
         let (send, recv) = channel::<()>();
         let child_pid = child.id().unwrap() as i32;
+        self.canceler = Some(send);
 
         tokio::spawn(async move {
             tokio::select! {
@@ -62,7 +66,7 @@ impl Ytdlp {
                     // NOTE: Currently I couldn't find a cross-platform way to kill a parent process
                     // and all of it's children. Crates like `process-wrap` are also broken and vibe
                     // coded slop. So I assume my target platform is Unix-like systems that support
-                    // `getpgid`, `kill` and `waitpid`.
+                    // `getpgid` and `kill`.
                     // To kill a process with all of it's children we have to get the process group
                     // id (pgid) and send SIGTERM to the group id. All child processes have same
                     // group ids.
@@ -70,13 +74,26 @@ impl Ytdlp {
                         let pgid = libc::getpgid(child_pid);
                         if pgid == -1 { return; }
                         _ = libc::kill(pgid, libc::SIGTERM);
-                        _ = libc::waitpid(child_pid, std::ptr::null_mut(), 0);
                     }
-                    println!("yt-dlp process terminated with SIGTERM");
+                    _ = child.wait().await;
+                    // println!("yt-dlp process terminated with SIGTERM");
                 }
             }
         });
 
-        Ok((stdout, send))
+        Ok(stdout)
+    }
+
+    pub fn terminate(&mut self) {
+        if self.canceler.is_some() {
+            let canceler = self.canceler.take().unwrap();
+            _ = canceler.send(());
+        }
+    }
+}
+
+impl Drop for Ytdlp {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }

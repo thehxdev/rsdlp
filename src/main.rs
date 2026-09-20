@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use serde_json::Value;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 mod ytdlp;
 
@@ -13,9 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!("Usage: {} <MEDIA URL>", args[0]);
     }
 
-    let mut downloader = ytdlp::Ytdlp::new(&args[1]);
+    let mut ytdlp = ytdlp::Ytdlp::new(&args[1]);
 
-    let media_info = downloader.get_media_info()
+    let media_info = ytdlp.get_media_info()
         .await?
         .expect("Media does not have any info");
 
@@ -29,12 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let title = String::from(title);
 
-    let (mut reader, canceler) = downloader.start(&["-S", "res:480"])?;
+    let mut reader = ytdlp.start(&["-S", "res:480"])?;
+
+    let ytdlp = Arc::new(Mutex::new(ytdlp));
 
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await
             .expect("Failed to get CTRL+C");
-        _ = canceler.send(());
+
+        _ = ytdlp.lock().await.terminate();
     });
 
     let dl_task = tokio::spawn(async move {
