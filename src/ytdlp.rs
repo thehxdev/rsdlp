@@ -1,4 +1,3 @@
-use serde_json::Value;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
@@ -24,26 +23,8 @@ impl Ytdlp {
         }
     }
 
-    pub async fn get_info(&self) -> Result<Option<Value>> {
-        let output = Command::new(BINARY)
-            .args(["-q", "-J", &self.url])
-            .stderr(Stdio::inherit())
-            .output()
-            .await?;
-
-        let output: Value = serde_json::from_slice(&output.stdout)?;
-
-        if let Value::Object(_) = output {
-            Ok(Some(output))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn start_download(&mut self, extra_args: &[&str]) -> Result<()> {
-        let mut ytdlp_args = vec!["-o", "-"];
-        ytdlp_args.extend_from_slice(extra_args);
-        ytdlp_args.push(&self.url);
+    pub fn start_download(&mut self) -> Result<()> {
+        let ytdlp_args = vec!["-o", "-", "-S", "res:720", &self.url];
 
         let mut child = Command::new(BINARY)
             .args(&ytdlp_args)
@@ -85,22 +66,13 @@ impl Ytdlp {
 
         Ok(())
     }
-
-    pub fn cancel_handle(&self) -> Option<watch::Sender<()>> {
-        self.canceler.clone()
-    }
-
-    pub fn terminate(&mut self) {
-        if let Some(canceler) = &self.canceler {
-            _ = canceler.send(());
-        }
-    }
 }
 
 impl Drop for Ytdlp {
     fn drop(&mut self) {
-        self.terminate();
-        // println!("ytdlp instance dropped and it's process group terminated");
+        if let Some(canceler) = &self.canceler {
+            _ = canceler.send(());
+        }
     }
 }
 
