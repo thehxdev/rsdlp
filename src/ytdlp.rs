@@ -24,7 +24,15 @@ impl Ytdlp {
     }
 
     pub fn start_download(&mut self) -> Result<()> {
-        let ytdlp_args = vec!["-o", "-", "-f", "bv*+ba/b", "-S", "res:720", &self.url];
+        let ytdlp_args = vec![
+            "--abort-on-error",
+            "--no-playlist",
+            "--retries", "5",
+            "-o", "-",
+            "-f", "bv*+ba/b",
+            "-S", "vcodec:h264,res:720,acodec:aac",
+            &self.url
+        ];
 
         let mut child = Command::new(BINARY)
             .args(&ytdlp_args)

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rsdlp – Download</title>
+<style>
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f5f5f7;
+    font: 16px/1.5 system-ui, sans-serif;
+    color: #222;
+  }
+  main {
+    width: min(560px, 90vw);
+    padding: 2rem;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .12);
+  }
+  h1 { margin: 0 0 .5rem; font-size: 1.3rem; }
+  p  { margin: 0 0 1.25rem; color: #666; }
+  form { display: flex; gap: .5rem; }
+  input[type="url"] {
+    flex: 1;
+    min-width: 0;
+    padding: .6rem .75rem;
+    border: 1px solid #bbb;
+    border-radius: 8px;
+    font: inherit;
+  }
+  button {
+    padding: .6rem 1.1rem;
+    border: 0;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+  }
+  small { display: block; margin-top: 1rem; color: #888; }
+</style>
+</head>
+<body>
+<main>
+  <h1>rsdlp</h1>
+  <p>Paste a media URL to stream it from the local yt-dlp API.</p>
+  <form method="post" action="/download">
+    <input type="url" name="url" placeholder="https://…" required autofocus>
+    <button type="submit">Download</button>
+  </form>
+  <small>The API streams the media back as-is; the file is saved under a browser-chosen name.</small>
+</main>
+</body>
+</html>

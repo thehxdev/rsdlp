@@ -1,4 +1,4 @@
-use axum::{Router, body::Body, extract::Form, response::Response, routing::post};
+use axum::{Router, body::Body, extract::Form, response::Response, routing::{get, post}};
 use serde::Deserialize;
 
 mod ytdlp;
@@ -10,7 +10,9 @@ struct DownloadForm {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route("/download", post(download_handler));
+    let app = Router::new()
+        .route("/", get(index_handler))
+        .route("/download", post(download_handler));
 
     let bind_address = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
@@ -18,6 +20,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn index_handler() -> Response {
+    match std::fs::read("index.html") {
+        Ok(bytes) => Response::builder()
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(500)
+            .body(Body::from("index.html not found"))
+            .unwrap(),
+    }
 }
 
 async fn download_handler(Form(form): Form<DownloadForm>) -> Response {

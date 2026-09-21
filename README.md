@@ -15,21 +15,15 @@ If the client disconnects, the server kills the whole yt-dlp process group so no
 ## Requirements
 
 - Rust and the cargo toolchain
-- `yt-dlp` executable installed and available on your `PATH`
+- `yt-dlp`, `ffmpeg` and NodeJS runtime executables installed and available on your `PATH`
 
 ## Run
 
 ```sh
 cargo run
 ```
-The server listens on `0.0.0.0:3000`.
+The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your browser.
 
-## Send a request
-
-```sh
-curl -X POST -d 'url=https://example.com/some/video' \
-  -o video.mp4 http://127.0.0.1:3000/download
-```
 
 ## Current Limitations
 
