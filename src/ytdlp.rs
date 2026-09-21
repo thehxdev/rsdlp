@@ -24,7 +24,7 @@ impl Ytdlp {
     }
 
     pub fn start_download(&mut self) -> Result<()> {
-        let ytdlp_args = vec!["-o", "-", "-S", "res:720", &self.url];
+        let ytdlp_args = vec!["-o", "-", "-f", "bv*+ba/b", "-S", "res:720", &self.url];
 
         let mut child = Command::new(BINARY)
             .args(&ytdlp_args)
