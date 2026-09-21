@@ -4,8 +4,16 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, Result};
 use tokio::process::{ChildStdout, Command};
 use tokio::sync::watch;
+use serde_json::Value;
 
 const BINARY: &str = "yt-dlp";
+const COMMON_FLAGS: &[&str] = &[
+    "--abort-on-error",
+    "--no-playlist",
+    "--retries", "5",
+    "-f", "bv*+ba/b",
+    "-S", "vcodec:h264,res:720,acodec:aac",
+];
 
 #[derive(Debug)]
 pub struct Ytdlp {
@@ -23,16 +31,32 @@ impl Ytdlp {
         }
     }
 
-    pub fn start_download(&mut self) -> Result<()> {
-        let ytdlp_args = vec![
-            "--abort-on-error",
-            "--no-playlist",
-            "--retries", "5",
-            "-o", "-",
-            "-f", "bv*+ba/b",
-            "-S", "vcodec:h264,res:720,acodec:aac",
+    pub async fn get_info(&self) -> Result<Option<Value>> {
+        let mut ytdlp_args = vec![
+            "-J",
             &self.url
         ];
+        ytdlp_args.extend_from_slice(COMMON_FLAGS);
+
+        let output = Command::new(BINARY)
+            .args(&ytdlp_args)
+            .output()
+            .await?;
+
+        let info: Value = serde_json::from_slice(&output.stdout)?;
+
+        Ok(match info {
+            Value::Object(_) => Some(info),
+            _ => None,
+        })
+    }
+
+    pub fn start_download(&mut self) -> Result<()> {
+        let mut ytdlp_args = vec![
+            "-o", "-",
+            &self.url
+        ];
+        ytdlp_args.extend_from_slice(COMMON_FLAGS);
 
         let mut child = Command::new(BINARY)
             .args(&ytdlp_args)

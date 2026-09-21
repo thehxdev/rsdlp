@@ -1,4 +1,4 @@
-use axum::{Router, body::Body, extract::Form, response::Response, routing::{get, post}};
+use axum::{Router, body::Body, extract::Form, http::StatusCode, response::Response, routing::{get, post}};
 use serde::Deserialize;
 
 mod ytdlp;
@@ -31,16 +31,59 @@ async fn index_handler() -> Response {
         .unwrap()
 }
 
-async fn download_handler(Form(form): Form<DownloadForm>) -> Response {
+#[axum::debug_handler]
+async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, StatusCode> {
+    use serde_json::Value;
+
+    let mut resp = Response::builder();
     let mut ytdlp = ytdlp::Ytdlp::new(&form.url);
 
-    ytdlp.start_download().expect("Failed to start download");
+    {
+        let info = ytdlp.get_info().await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::BAD_REQUEST)?;
+
+        let requested_download = info.get("requested_downloads")
+            .and_then(Value::as_array)
+            .ok_or(StatusCode::BAD_REQUEST)?
+            .get(0)
+            .and_then(Value::as_object)
+            .ok_or(StatusCode::BAD_REQUEST)?;
+
+        let filename = requested_download
+            .get("filename")
+            .and_then(|value| {
+                match value {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| {
+                let ext = requested_download.get("ext")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bin");
+                format!("unknown_title.{ext}")
+            });
+
+        resp = resp.header("Content-Disposition", format!("attachment; filename=\"{filename}\""));
+
+        use serde_json::Number;
+        let filesize = requested_download.get("filesize_approx")
+            .and_then(Value::as_number)
+            .unwrap_or(&Number::from(0u64))
+            .as_u64();
+
+        if let Some(filesize) = filesize {
+            resp = resp.header("Content-Length", format!("{filesize}"));
+        }
+    }
+
+    ytdlp.start_download()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let stream = tokio_util::io::ReaderStream::new(ytdlp);
     let body = Body::from_stream(stream);
 
-    Response::builder()
-        .header("Content-Type", "application/octet-stream")
-        .body(body)
-        .unwrap()
+    resp.body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
