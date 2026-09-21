@@ -3,6 +3,8 @@ use serde::Deserialize;
 
 mod ytdlp;
 
+const INDEX_HTML: &[u8] = include_bytes!("../index.html");
+
 #[derive(Deserialize)]
 struct DownloadForm {
     url: String,
@@ -23,16 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn index_handler() -> Response {
-    match std::fs::read("index.html") {
-        Ok(bytes) => Response::builder()
-            .header("Content-Type", "text/html; charset=utf-8")
-            .body(Body::from(bytes))
-            .unwrap(),
-        Err(_) => Response::builder()
-            .status(500)
-            .body(Body::from("index.html not found"))
-            .unwrap(),
-    }
+    Response::builder()
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(Body::from(INDEX_HTML))
+        .unwrap()
 }
 
 async fn download_handler(Form(form): Form<DownloadForm>) -> Response {
