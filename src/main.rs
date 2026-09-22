@@ -31,7 +31,6 @@ async fn index_handler() -> Response {
         .unwrap()
 }
 
-#[axum::debug_handler]
 async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, StatusCode> {
     use serde_json::Value;
 
@@ -40,7 +39,10 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
 
     {
         let info = ytdlp.get_info().await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                eprintln!("{e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
             .ok_or(StatusCode::BAD_REQUEST)?;
 
         let requested_download = info.get("requested_downloads")
@@ -67,23 +69,28 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
 
         resp = resp.header("Content-Disposition", format!("attachment; filename=\"{filename}\""));
 
-        use serde_json::Number;
-        let filesize = requested_download.get("filesize_approx")
-            .and_then(Value::as_number)
-            .unwrap_or(&Number::from(0u64))
-            .as_u64();
-
-        if let Some(filesize) = filesize {
-            resp = resp.header("Content-Length", format!("{filesize}"));
-        }
+        // use serde_json::Number;
+        // let filesize = requested_download.get("filesize_approx")
+        //     .and_then(Value::as_number)
+        //     .unwrap_or(&Number::from(0u64))
+        //     .as_u64();
+        // if let Some(filesize) = filesize && filesize > 0 {
+        //     resp = resp.header("Content-Length", format!("{filesize}"));
+        // }
     }
 
     ytdlp.start_download()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            eprintln!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let stream = tokio_util::io::ReaderStream::new(ytdlp);
     let body = Body::from_stream(stream);
 
     resp.body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| {
+            eprintln!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }

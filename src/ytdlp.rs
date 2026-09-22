@@ -8,11 +8,15 @@ use serde_json::Value;
 
 const BINARY: &str = "yt-dlp";
 const COMMON_FLAGS: &[&str] = &[
+    // "-v",
     "--abort-on-error",
     "--no-playlist",
     "--retries", "5",
-    "-f", "bv*+ba/b",
-    "-S", "vcodec:h264,res:720,acodec:aac",
+    "--downloader-args", "ffmpeg:-preset ultrafast -c copy",
+    "--no-embed-thumbnail",
+    "--no-embed-metadata",
+    "-f", "b/bv*+ba",
+    "-S", "res:720",
 ];
 
 #[derive(Debug)]
