@@ -51,10 +51,15 @@ Environment variables can be stored in a `.env` file (copy from `.env.example`).
 
 ### Usage
 
-- Send any media URL to the user bot account in a private chat or in **Saved Messages**.
-- The bot fetches available formats and replies with clickable quality options (`/dl_1080`, `/dl_720`, `/dl_audio_320`, `/dl_best`).
-- Tap an option to download and stream the media file directly in Telegram.
-- Send `/cancel` to abort a pending selection.
+- Send any media URL to the bot in a private chat (or in **Saved Messages** if running on a user account).
+- The bot fetches available formats and replies with interactive inline buttons (`1080p`, `720p`, `🎵 320k`, `⚡ Best`, `❌ Cancel`) as well as clickable fallback text commands.
+- Tap any button to download and upload the media file directly in Telegram.
+- Tap **❌ Cancel** (or send `/cancel`) to abort.
+- All temporary files are wrapped with an RAII cleanup guard (`TempFileGuard`) guaranteeing files are immediately deleted from disk when upload finishes, when an error occurs, or upon cancellation.
+
+### Streaming Architecture Note
+
+Telegram MTProto uploads (`upload.saveBigFilePart`) require knowing the exact file size and part count in advance to validate parts and construct `InputFileBig`. Because `yt-dlp` dynamically remuxes audio and video streams via `ffmpeg` to stdout with variable bitrate and muxing overhead, stream byte sizes cannot be determined upfront. `rsdlp` stages the media locally in temp storage, uploads via MTProto, and relies on `TempFileGuard` to guarantee zero residual disk usage across all termination paths.
 
 
 ## Current Limitations

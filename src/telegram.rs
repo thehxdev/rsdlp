@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use grammers_client::client::{Client, SignInError, UpdatesConfiguration};
 use grammers_client::types::update;
 use grammers_client::types::{InputMessage, Update};
+use grammers_client::{button, reply_markup};
 use grammers_mtsender::SenderPool;
-use grammers_session::defs::PeerId;
+use grammers_session::defs::{PeerId, PeerRef};
 use grammers_session::storages::SqliteSession;
 
 use crate::ytdlp::{self, Qualities, Ytdlp};
@@ -126,6 +127,101 @@ pub fn format_qualities_menu(title: &str, qualities: &Qualities) -> String {
     msg.push_str("⚡ /dl_best — Best available\n");
     msg.push_str("❌ /cancel — Cancel");
     msg
+}
+
+/// Builds inline keyboard markup for video, audio, best, and cancel options.
+pub fn build_qualities_inline_markup(qualities: &Qualities) -> reply_markup::Inline {
+    let mut rows: Vec<Vec<button::Inline>> = Vec::new();
+
+    if !qualities.video.is_empty() {
+        let mut video_row = Vec::new();
+        for &res in qualities.video.iter().rev() {
+            video_row.push(button::inline(format!("{res}p"), format!("dl:{res}")));
+            if video_row.len() == 3 {
+                rows.push(std::mem::take(&mut video_row));
+            }
+        }
+        if !video_row.is_empty() {
+            rows.push(video_row);
+        }
+    }
+
+    if !qualities.audio.is_empty() {
+        let mut audio_row = Vec::new();
+        for &abr in qualities.audio.iter().rev() {
+            audio_row.push(button::inline(format!("🎵 {abr}k"), format!("dl_audio:{abr}")));
+            if audio_row.len() == 3 {
+                rows.push(std::mem::take(&mut audio_row));
+            }
+        }
+        if !audio_row.is_empty() {
+            rows.push(audio_row);
+        }
+    }
+
+    rows.push(vec![
+        button::inline("⚡ Best", "dl:best"),
+        button::inline("❌ Cancel", "cancel"),
+    ]);
+
+    reply_markup::inline(rows)
+}
+
+/// Parses inline button callback data into corresponding TelegramAction.
+pub fn parse_callback_action(data: &[u8]) -> TelegramAction {
+    let s = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        Err(_) => return TelegramAction::Unknown,
+    };
+    if s == "cancel" {
+        return TelegramAction::Cancel;
+    }
+    if s == "dl:best" {
+        return TelegramAction::SelectQuality {
+            res: None,
+            abr: None,
+        };
+    }
+    if let Some(res_str) = s.strip_prefix("dl:") {
+        if let Ok(res) = res_str.parse::<u64>() {
+            return TelegramAction::SelectQuality {
+                res: Some(res),
+                abr: None,
+            };
+        }
+    }
+    if let Some(abr_str) = s.strip_prefix("dl_audio:") {
+        if let Ok(abr) = abr_str.parse::<u64>() {
+            return TelegramAction::SelectQuality {
+                res: None,
+                abr: Some(abr),
+            };
+        }
+    }
+    TelegramAction::Unknown
+}
+
+/// RAII guard ensuring temporary downloaded files are unconditionally deleted upon drop.
+pub struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -267,7 +363,77 @@ pub async fn run_bot(
                     });
                 }
             }
+            Update::CallbackQuery(query) => {
+                let client_clone = client.clone();
+                let state_clone = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_callback_query(client_clone, state_clone, query).await {
+                        eprintln!("[telegram] error handling callback query: {e}");
+                    }
+                });
+            }
             _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn peer_ref_from_message(message: &update::Message) -> PeerRef {
+    match message.peer() {
+        Ok(p) => p.into(),
+        Err(r) => r,
+    }
+}
+
+async fn handle_callback_query(
+    client: Client,
+    state: Arc<BotState>,
+    query: update::CallbackQuery,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let peer_id = query.peer().id();
+    let action = parse_callback_action(query.data());
+
+    match action {
+        TelegramAction::Cancel => {
+            state.pending.lock().await.remove(&peer_id);
+            let _ = query
+                .answer()
+                .edit(InputMessage::new().text("❌ Current operation cancelled."))
+                .await;
+        }
+        TelegramAction::SelectQuality { res, abr } => {
+            let pending_opt = state.pending.lock().await.remove(&peer_id);
+            let pending = match pending_opt {
+                Some(p) => p,
+                None => {
+                    let _ = query
+                        .answer()
+                        .alert("No pending media URL. Send a URL first!")
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+            };
+
+            let desc = match (res, abr) {
+                (Some(r), _) => format!("{r}p"),
+                (None, Some(a)) => format!("{a} kbps audio"),
+                (None, None) => "best quality".to_string(),
+            };
+
+            let _ = query
+                .answer()
+                .edit(InputMessage::new().text(format!(
+                    "⏳ Downloading {} ({desc})...",
+                    pending.title
+                )))
+                .await;
+
+            execute_download_and_upload(&client, query.peer(), pending, res, abr, &desc).await?;
+        }
+        _ => {
+            let _ = query.answer().send().await;
         }
     }
 
@@ -322,7 +488,10 @@ async fn handle_message(
                     );
 
                     let menu = format_qualities_menu(&title, &qualities);
-                    status_msg.edit(InputMessage::new().text(menu)).await?;
+                    let markup = build_qualities_inline_markup(&qualities);
+                    status_msg
+                        .edit(InputMessage::new().text(menu).reply_markup(&markup))
+                        .await?;
                 }
                 _ => {
                     status_msg
@@ -345,82 +514,103 @@ async fn handle_message(
                 }
             };
 
-            let sort_str = ytdlp::build_sort(res, abr);
             let desc = match (res, abr) {
                 (Some(r), _) => format!("{r}p"),
                 (None, Some(a)) => format!("{a} kbps audio"),
                 (None, None) => "best quality".to_string(),
             };
 
-            let status_msg = message
+            message
                 .respond(InputMessage::new().text(format!(
                     "⏳ Downloading {} ({desc})...",
                     pending.title
                 )))
                 .await?;
 
-            let mut ytdlp = Ytdlp::new(
-                &pending.url,
-                if sort_str.is_empty() {
-                    None
-                } else {
-                    Some(sort_str)
-                },
-            );
-
-            let filename = match ytdlp.get_info().await {
-                Ok(Some(info)) => ytdlp::extract_filename(&info),
-                _ => "video.mp4".to_string(),
-            };
-
-            let id = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let safe_filename = filename.replace(['/', '\\', '\0'], "_");
-            let temp_path = PathBuf::from(std::env::temp_dir()).join(format!(
-                "rsdlp_{}_{}_{}",
-                std::process::id(),
-                id,
-                safe_filename
-            ));
-
-            let download_res = async {
-                ytdlp.start_download()?;
-                let mut temp_file = tokio::fs::File::create(&temp_path).await?;
-                tokio::io::copy(&mut ytdlp, &mut temp_file).await?;
-                temp_file.flush().await?;
-                Ok::<(), std::io::Error>(())
-            }
-            .await;
-
-            if let Err(e) = download_res {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                status_msg
-                    .edit(InputMessage::new().text(format!("Download failed: {e}")))
-                    .await?;
-                return Ok(());
-            }
-
-            status_msg
-                .edit(InputMessage::new().text("📤 Uploading to Telegram..."))
-                .await?;
-
-            let upload_res = client.upload_file(&temp_path).await;
-            let _ = tokio::fs::remove_file(&temp_path).await;
-
-            match upload_res {
-                Ok(uploaded) => {
-                    let caption = format!("🎬 {}\nQuality: {desc}", pending.title);
-                    let input_file = InputMessage::new().file(uploaded).text(caption);
-                    message.respond(input_file).await?;
-                    let _ = status_msg.delete().await;
-                }
-                Err(e) => {
-                    status_msg
-                        .edit(InputMessage::new().text(format!("Upload failed: {e}")))
-                        .await?;
-                }
-            }
+            execute_download_and_upload(
+                &client,
+                peer_ref_from_message(&message),
+                pending,
+                res,
+                abr,
+                &desc,
+            )
+            .await?;
         }
         TelegramAction::Unknown => {}
+    }
+
+    Ok(())
+}
+
+async fn execute_download_and_upload<P: Into<PeerRef>>(
+    client: &Client,
+    peer: P,
+    pending: PendingChoice,
+    res: Option<u64>,
+    abr: Option<u64>,
+    desc: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let peer_ref = peer.into();
+    let sort_str = ytdlp::build_sort(res, abr);
+    let mut ytdlp = Ytdlp::new(
+        &pending.url,
+        if sort_str.is_empty() {
+            None
+        } else {
+            Some(sort_str)
+        },
+    );
+
+    let filename = match ytdlp.get_info().await {
+        Ok(Some(info)) => ytdlp::extract_filename(&info),
+        _ => "video.mp4".to_string(),
+    };
+
+    let id = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let safe_filename = filename.replace(['/', '\\', '\0'], "_");
+    let temp_path = PathBuf::from(std::env::temp_dir()).join(format!(
+        "rsdlp_{}_{}_{}",
+        std::process::id(),
+        id,
+        safe_filename
+    ));
+    let guard = TempFileGuard::new(temp_path);
+
+    let download_res = async {
+        ytdlp.start_download()?;
+        let mut temp_file = tokio::fs::File::create(guard.path()).await?;
+        tokio::io::copy(&mut ytdlp, &mut temp_file).await?;
+        temp_file.flush().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+
+    if let Err(e) = download_res {
+        client
+            .send_message(peer_ref, InputMessage::new().text(format!("Download failed: {e}")))
+            .await?;
+        return Ok(());
+    }
+
+    let upload_msg = client
+        .send_message(peer_ref, InputMessage::new().text("📤 Uploading to Telegram..."))
+        .await?;
+
+    let upload_res = client.upload_file(guard.path()).await;
+
+    match upload_res {
+        Ok(uploaded) => {
+            let caption = format!("🎬 {}\nQuality: {desc}", pending.title);
+            let input_file = InputMessage::new().file(uploaded).text(caption);
+            client.send_message(peer_ref, input_file).await?;
+            let _ = upload_msg.delete().await;
+        }
+        Err(e) => {
+            upload_msg
+                .edit(InputMessage::new().text(format!("Upload failed: {e}")))
+                .await?;
+        }
     }
 
     Ok(())
@@ -489,6 +679,59 @@ mod tests {
         assert!(menu.contains("/dl_audio_320 — 320 kbps"));
         assert!(menu.contains("/dl_best"));
         assert!(menu.contains("/cancel"));
+    }
+
+    #[test]
+    fn test_parse_callback_action() {
+        assert_eq!(parse_callback_action(b"cancel"), TelegramAction::Cancel);
+        assert_eq!(
+            parse_callback_action(b"dl:best"),
+            TelegramAction::SelectQuality {
+                res: None,
+                abr: None
+            }
+        );
+        assert_eq!(
+            parse_callback_action(b"dl:1080"),
+            TelegramAction::SelectQuality {
+                res: Some(1080),
+                abr: None
+            }
+        );
+        assert_eq!(
+            parse_callback_action(b"dl_audio:320"),
+            TelegramAction::SelectQuality {
+                res: None,
+                abr: Some(320)
+            }
+        );
+        assert_eq!(parse_callback_action(b"unknown_cmd"), TelegramAction::Unknown);
+    }
+
+    #[test]
+    fn test_build_qualities_inline_markup() {
+        let qualities = Qualities {
+            video: vec![360, 720, 1080],
+            audio: vec![128, 320],
+        };
+        let _markup = build_qualities_inline_markup(&qualities);
+    }
+
+    #[test]
+    fn test_temp_file_guard_deletion() {
+        let path =
+            std::env::temp_dir().join(format!("rsdlp_test_guard_{}.tmp", std::process::id()));
+        std::fs::write(&path, b"test payload").expect("create test file");
+        assert!(path.exists());
+
+        {
+            let _guard = TempFileGuard::new(path.clone());
+        } // guard dropped here
+
+        assert!(
+            !path.exists(),
+            "temporary file must be deleted when guard drops"
+        );
     }
 
     #[test]
