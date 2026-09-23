@@ -9,6 +9,7 @@ use axum::{
 use serde::Deserialize;
 
 mod ytdlp;
+mod telegram;
 
 const INDEX_HTML: &[u8] = include_bytes!("../index.html");
 
