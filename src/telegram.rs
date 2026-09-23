@@ -138,11 +138,17 @@ pub struct TelegramConfig {
 
 impl TelegramConfig {
     pub fn from_env() -> Option<Self> {
-        let api_id = env::var("TG_API_ID").ok()?.parse().ok()?;
-        let api_hash = env::var("TG_API_HASH").ok()?;
-        let bot_token = env::var("TG_BOT_TOKEN").ok().filter(|s| !s.trim().is_empty());
+        let get_var = |key: &str| {
+            env::var(format!("RSDLP_{key}"))
+                .ok()
+                .or_else(|| env::var(key).ok())
+        };
+
+        let api_id = get_var("TG_API_ID")?.parse().ok()?;
+        let api_hash = get_var("TG_API_HASH")?;
+        let bot_token = get_var("TG_BOT_TOKEN").filter(|s| !s.trim().is_empty());
         let session_file =
-            env::var("TG_SESSION_FILE").unwrap_or_else(|_| "rsdlp.session".to_string());
+            get_var("TG_SESSION_FILE").unwrap_or_else(|| "rsdlp.session".to_string());
 
         Some(Self {
             api_id,
@@ -488,25 +494,31 @@ mod tests {
     #[test]
     fn test_config_from_env() {
         unsafe {
+            env::remove_var("RSDLP_TG_API_ID");
+            env::remove_var("RSDLP_TG_API_HASH");
+            env::remove_var("RSDLP_TG_BOT_TOKEN");
             env::remove_var("TG_API_ID");
             env::remove_var("TG_API_HASH");
             env::remove_var("TG_BOT_TOKEN");
         }
         assert!(TelegramConfig::from_env().is_none());
 
+        // Test prefixed RSDLP_* variables
         unsafe {
-            env::set_var("TG_API_ID", "12345");
-            env::set_var("TG_API_HASH", "abcdef");
-            env::set_var("TG_BOT_TOKEN", "123:ABC");
+            env::set_var("RSDLP_TG_API_ID", "12345");
+            env::set_var("RSDLP_TG_API_HASH", "abcdef");
+            env::set_var("RSDLP_TG_BOT_TOKEN", "123:ABC");
         }
         let config = TelegramConfig::from_env().expect("config should parse");
         assert_eq!(config.api_id, 12345);
         assert_eq!(config.api_hash, "abcdef");
         assert_eq!(config.bot_token.as_deref(), Some("123:ABC"));
+
+        // Clean up
         unsafe {
-            env::remove_var("TG_API_ID");
-            env::remove_var("TG_API_HASH");
-            env::remove_var("TG_BOT_TOKEN");
+            env::remove_var("RSDLP_TG_API_ID");
+            env::remove_var("RSDLP_TG_API_HASH");
+            env::remove_var("RSDLP_TG_BOT_TOKEN");
         }
     }
 }

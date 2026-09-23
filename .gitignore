@@ -4,3 +4,6 @@
 .pi/
 .hermes/
 *.session*
+.env
+.env.*
+!.env.example

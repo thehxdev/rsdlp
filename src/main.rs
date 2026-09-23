@@ -44,8 +44,41 @@ struct QualitiesForm {
     url: String,
 }
 
+fn parse_dotenv_content(content: &str) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let val = val.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+            vars.push((key, val));
+        }
+    }
+    vars
+}
+
+/// Load key-value pairs from `.env` file into process environment if not already set.
+fn load_dotenv() {
+    let Ok(content) = std::fs::read_to_string(".env") else {
+        return;
+    };
+    for (key, val) in parse_dotenv_content(&content) {
+        if std::env::var(&key).is_err() {
+            // ponytail: basic .env parser; upgrade to dotenvy if complex multiline/escaping needed
+            unsafe {
+                std::env::set_var(&key, val);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    load_dotenv();
+
     let args: Vec<String> = std::env::args().collect();
 
     if let Some(tg_config) = telegram::TelegramConfig::from_env() {
@@ -66,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         });
     } else {
-        println!("Telegram credentials not set (TG_API_ID / TG_API_HASH). Running web-only mode.");
+        println!("Telegram credentials not set (RSDLP_TG_API_ID / RSDLP_TG_API_HASH). Running web-only mode.");
     }
 
     let app = Router::new()
@@ -74,8 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/download", post(download_handler))
         .route("/qualities", post(qualities_handler));
 
-    let bind_address = "0.0.0.0:3000";
-    let listener = tokio::net::TcpListener::bind(bind_address).await?;
+    let bind_address = std::env::var("RSDLP_BIND_ADDRESS")
+        .or_else(|_| std::env::var("BIND_ADDRESS"))
+        .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     println!("listening on {bind_address}");
     axum::serve(listener, app).await?;
 
@@ -142,4 +177,30 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
             eprintln!("{e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dotenv_content() {
+        let sample = r#"
+        # Comment line
+        RSDLP_BIND_ADDRESS="127.0.0.1:8080"
+        RSDLP_TG_API_ID=12345
+        EMPTY_VAR=
+        QUOTED_VAL='single-quoted'
+        "#;
+        let parsed = parse_dotenv_content(sample);
+        assert_eq!(
+            parsed,
+            vec![
+                ("RSDLP_BIND_ADDRESS".to_string(), "127.0.0.1:8080".to_string()),
+                ("RSDLP_TG_API_ID".to_string(), "12345".to_string()),
+                ("EMPTY_VAR".to_string(), "".to_string()),
+                ("QUOTED_VAL".to_string(), "single-quoted".to_string()),
+            ]
+        );
+    }
 }

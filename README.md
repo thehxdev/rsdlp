@@ -23,7 +23,9 @@ If the client disconnects, the server kills the whole yt-dlp process group so no
 ```sh
 cargo run
 ```
-The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your browser.
+The server listens on `0.0.0.0:3000` (configurable via `RSDLP_BIND_ADDRESS`). Then open `http://127.0.0.1:3000` in your browser.
+
+Environment variables can be stored in a `.env` file (copy from `.env.example`).
 
 ## Telegram User Bot
 
@@ -32,20 +34,20 @@ The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your 
 ### Setup
 
 1. Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-2. Set environment variables:
+2. Set environment variables (or put them in `.env`):
    ```sh
-   export TG_API_ID="1234567"
-   export TG_API_HASH="0123456789abcdef0123456789abcdef"
-   export TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" # bot token from @BotFather
-   export TG_SESSION_FILE="rsdlp.session" # optional, defaults to rsdlp.session
+   export RSDLP_TG_API_ID="1234567"
+   export RSDLP_TG_API_HASH="0123456789abcdef0123456789abcdef"
+   export RSDLP_TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" # bot token from @BotFather
+   export RSDLP_TG_SESSION_FILE="rsdlp.session" # optional, defaults to rsdlp.session
    ```
 3. Run `rsdlp`:
    ```sh
    cargo run
    ```
-   If `TG_BOT_TOKEN` is set, authentication happens automatically on startup without any interactive phone/code prompts.
+   If `RSDLP_TG_BOT_TOKEN` is set, authentication happens automatically on startup without any interactive phone/code prompts.
 
-   *(Optional: If not using a bot token and logging in with a phone number instead, omit `TG_BOT_TOKEN` and run `cargo run -- --tg-login` once to authenticate via phone code and 2FA password).*
+   *(Optional: If not using a bot token and logging in with a phone number instead, omit `RSDLP_TG_BOT_TOKEN` and run `cargo run -- --tg-login` once to authenticate via phone code and 2FA password).*
 
 ### Usage
 
