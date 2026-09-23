@@ -2,3 +2,5 @@
 
 # AI agents
 .pi/
+.hermes/
+*.session*
