@@ -25,6 +25,37 @@ cargo run
 ```
 The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your browser.
 
+## Telegram User Bot
+
+`rsdlp` can optionally run as a Telegram user bot (logging in as a regular Telegram user account via MTProto, allowing file uploads up to 2GB).
+
+### Setup
+
+1. Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
+2. Set environment variables:
+   ```sh
+   export TG_API_ID="1234567"
+   export TG_API_HASH="0123456789abcdef0123456789abcdef"
+   export TG_SESSION_FILE="rsdlp.session" # optional, defaults to rsdlp.session
+   ```
+3. Run one-time interactive login to authenticate your session:
+   ```sh
+   cargo run -- --tg-login
+   ```
+   Enter your phone number, the verification code received on Telegram, and 2FA password (if enabled). The session is saved to `rsdlp.session`.
+4. Start `rsdlp`:
+   ```sh
+   cargo run
+   ```
+   Both the Axum HTTP server and the Telegram user bot run concurrently. If Telegram environment variables are not set, `rsdlp` runs in web-only mode.
+
+### Usage
+
+- Send any media URL to the user bot account in a private chat or in **Saved Messages**.
+- The bot fetches available formats and replies with clickable quality options (`/dl_1080`, `/dl_720`, `/dl_audio_320`, `/dl_best`).
+- Tap an option to download and stream the media file directly in Telegram.
+- Send `/cancel` to abort a pending selection.
+
 
 ## Current Limitations
 
