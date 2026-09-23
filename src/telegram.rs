@@ -132,6 +132,7 @@ pub fn format_qualities_menu(title: &str, qualities: &Qualities) -> String {
 pub struct TelegramConfig {
     pub api_id: i32,
     pub api_hash: String,
+    pub bot_token: Option<String>,
     pub session_file: String,
 }
 
@@ -139,12 +140,14 @@ impl TelegramConfig {
     pub fn from_env() -> Option<Self> {
         let api_id = env::var("TG_API_ID").ok()?.parse().ok()?;
         let api_hash = env::var("TG_API_HASH").ok()?;
+        let bot_token = env::var("TG_BOT_TOKEN").ok().filter(|s| !s.trim().is_empty());
         let session_file =
             env::var("TG_SESSION_FILE").unwrap_or_else(|_| "rsdlp.session".to_string());
 
         Some(Self {
             api_id,
             api_hash,
+            bot_token,
             session_file,
         })
     }
@@ -163,8 +166,16 @@ fn prompt(message: &str) -> io::Result<String> {
 pub async fn authorize_client(
     client: &Client,
     api_hash: &str,
+    bot_token: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if client.is_authorized().await? {
+        return Ok(());
+    }
+
+    if let Some(token) = bot_token {
+        println!("[telegram] Session not authorized. Signing in with bot token...");
+        client.bot_sign_in(token, api_hash).await?;
+        println!("[telegram] Bot token login successful!");
         return Ok(());
     }
 
@@ -215,7 +226,7 @@ pub async fn run_bot(
     let client = Client::new(&pool);
     let _pool_task = tokio::spawn(pool.runner.run());
 
-    authorize_client(&client, &config.api_hash).await?;
+    authorize_client(&client, &config.api_hash, config.bot_token.as_deref()).await?;
 
     let me = client.get_me().await?;
     let me_peer_id = PeerId::user(me.raw.id());
@@ -475,11 +486,27 @@ mod tests {
     }
 
     #[test]
-    fn test_config_from_env_absent() {
+    fn test_config_from_env() {
         unsafe {
             env::remove_var("TG_API_ID");
             env::remove_var("TG_API_HASH");
+            env::remove_var("TG_BOT_TOKEN");
         }
         assert!(TelegramConfig::from_env().is_none());
+
+        unsafe {
+            env::set_var("TG_API_ID", "12345");
+            env::set_var("TG_API_HASH", "abcdef");
+            env::set_var("TG_BOT_TOKEN", "123:ABC");
+        }
+        let config = TelegramConfig::from_env().expect("config should parse");
+        assert_eq!(config.api_id, 12345);
+        assert_eq!(config.api_hash, "abcdef");
+        assert_eq!(config.bot_token.as_deref(), Some("123:ABC"));
+        unsafe {
+            env::remove_var("TG_API_ID");
+            env::remove_var("TG_API_HASH");
+            env::remove_var("TG_BOT_TOKEN");
+        }
     }
 }

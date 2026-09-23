@@ -27,7 +27,7 @@ The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your 
 
 ## Telegram User Bot
 
-`rsdlp` can optionally run as a Telegram user bot (logging in as a regular Telegram user account via MTProto, allowing file uploads up to 2GB).
+`rsdlp` can optionally run as a Telegram MTProto bot (supporting both standard bot tokens and user account logins, with MTProto allowing file uploads up to 2GB).
 
 ### Setup
 
@@ -36,18 +36,16 @@ The server listens on `0.0.0.0:3000`. Then open `http://127.0.0.1:3000` in your 
    ```sh
    export TG_API_ID="1234567"
    export TG_API_HASH="0123456789abcdef0123456789abcdef"
+   export TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" # bot token from @BotFather
    export TG_SESSION_FILE="rsdlp.session" # optional, defaults to rsdlp.session
    ```
-3. Run one-time interactive login to authenticate your session:
-   ```sh
-   cargo run -- --tg-login
-   ```
-   Enter your phone number, the verification code received on Telegram, and 2FA password (if enabled). The session is saved to `rsdlp.session`.
-4. Start `rsdlp`:
+3. Run `rsdlp`:
    ```sh
    cargo run
    ```
-   Both the Axum HTTP server and the Telegram user bot run concurrently. If Telegram environment variables are not set, `rsdlp` runs in web-only mode.
+   If `TG_BOT_TOKEN` is set, authentication happens automatically on startup without any interactive phone/code prompts.
+
+   *(Optional: If not using a bot token and logging in with a phone number instead, omit `TG_BOT_TOKEN` and run `cargo run -- --tg-login` once to authenticate via phone code and 2FA password).*
 
 ### Usage
 

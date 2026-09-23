@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let pool = grammers_mtsender::SenderPool::new(std::sync::Arc::clone(&session), tg_config.api_id);
             let client = grammers_client::Client::new(&pool);
             tokio::spawn(pool.runner.run());
-            telegram::authorize_client(&client, &tg_config.api_hash).await?;
+            telegram::authorize_client(&client, &tg_config.api_hash, tg_config.bot_token.as_deref()).await?;
             println!("Login complete. Session saved to {}", tg_config.session_file);
             return Ok(());
         }
