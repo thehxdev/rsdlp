@@ -16,6 +16,8 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 tokio-util = { version = "0.7", features = ["io"] }
 axum = { version = "0.8", features = ["default", "macros"] }
 libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 grammers-client = "0.8"
 grammers-session = "0.8"
 grammers-mtsender = "0.8"

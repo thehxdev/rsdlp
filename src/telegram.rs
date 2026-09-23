@@ -280,9 +280,9 @@ pub async fn authorize_client(
     }
 
     if let Some(token) = bot_token {
-        println!("[telegram] Session not authorized. Signing in with bot token...");
+        tracing::info!("Telegram session not authorized. Signing in with bot token...");
         client.bot_sign_in(token, api_hash).await?;
-        println!("[telegram] Bot token login successful!");
+        tracing::info!("Telegram bot token login successful");
         return Ok(());
     }
 
@@ -351,8 +351,8 @@ pub async fn run_bot(
 
     let me = client.get_me().await?;
     let me_peer_id = PeerId::user(me.raw.id());
-    println!(
-        "[telegram] Userbot running as {} (id: {})",
+    tracing::info!(
+        "[telegram] userbot running as {} (id: {})",
         me.first_name().unwrap_or("User"),
         me.raw.id()
     );
@@ -377,7 +377,7 @@ pub async fn run_bot(
                     let state_clone = Arc::clone(&state);
                     tokio::spawn(async move {
                         if let Err(e) = handle_message(client_clone, state_clone, message).await {
-                            eprintln!("[telegram] error handling message: {e}");
+                            tracing::error!("[telegram] error handling message: {e}");
                         }
                     });
                 }
@@ -387,7 +387,7 @@ pub async fn run_bot(
                 let state_clone = Arc::clone(&state);
                 tokio::spawn(async move {
                     if let Err(e) = handle_callback_query(client_clone, state_clone, query).await {
-                        eprintln!("[telegram] error handling callback query: {e}");
+                        tracing::error!("[telegram] error handling callback query: {e}");
                     }
                 });
             }
@@ -469,7 +469,7 @@ async fn handle_callback_query(
                     .await
                     .remove(&peer_id_copy);
                 if let Err(e) = res {
-                    eprintln!("[telegram] download/upload error: {e}");
+                    tracing::error!("[telegram] download/upload error: {e}");
                 }
             });
 
@@ -592,7 +592,7 @@ async fn handle_message(
                     .await
                     .remove(&peer_id_copy);
                 if let Err(e) = res {
-                    eprintln!("[telegram] download/upload error: {e}");
+                    tracing::error!("[telegram] download/upload error: {e}");
                 }
             });
 

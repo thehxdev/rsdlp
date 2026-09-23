@@ -27,6 +27,14 @@ The server listens on `0.0.0.0:3000` (configurable via `RSDLP_BIND_ADDRESS`). Th
 
 Environment variables can be stored in a `.env` file (copy from `.env.example`).
 
+### Logging & Observability
+
+`rsdlp` uses `tracing` and `tracing-subscriber`. Log levels (`trace`, `debug`, `info`, `warn`, `error`) can be configured via:
+- Command-line flag: `cargo run -- --log-level debug` (or `--log debug`, `-l debug`)
+- Environment variable: `export RSDLP_LOG=debug` (or `RUST_LOG=debug`)
+
+**Priority**: The environment variable (`RSDLP_LOG` / `RUST_LOG`) takes precedence over the command-line flag if both are specified. Defaults to `info`.
+
 ## Telegram User Bot
 
 `rsdlp` can optionally run as a Telegram MTProto bot (supporting both standard bot tokens and user account logins, with MTProto allowing file uploads up to 2GB).

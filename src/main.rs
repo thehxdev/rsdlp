@@ -33,7 +33,7 @@ fn parse_quality(name: &str, raw: Option<String>) -> Result<Option<u64>, StatusC
             .parse()
             .map(Some)
             .map_err(|e| {
-                eprintln!("invalid {name}: {e}");
+                tracing::warn!("invalid {name}: {e}");
                 StatusCode::BAD_REQUEST
             }),
     }
@@ -75,31 +75,77 @@ fn load_dotenv() {
     }
 }
 
+/// Determine active log filter: environment variable has priority over CLI flag.
+fn determine_log_filter(args: &[String]) -> String {
+    // 1. Environment variable has highest priority
+    if let Ok(env_val) = std::env::var("RSDLP_LOG").or_else(|_| std::env::var("RUST_LOG")) {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    // 2. Command-line flag
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--log-level" || arg == "--log" || arg == "-l" {
+            if let Some(val) = iter.next() {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        } else if let Some(val) = arg.strip_prefix("--log-level=").or_else(|| arg.strip_prefix("--log=")) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    // 3. Default level
+    "info".to_string()
+}
+
+fn init_logging(filter_directive: &str) {
+    let filter = tracing_subscriber::EnvFilter::try_new(filter_directive)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     load_dotenv();
 
     let args: Vec<String> = std::env::args().collect();
+    let log_filter = determine_log_filter(&args);
+    init_logging(&log_filter);
+    tracing::info!("rsdlp starting (log_filter={})", log_filter);
 
     if let Some(tg_config) = telegram::TelegramConfig::from_env() {
         if args.iter().any(|arg| arg == "--tg-login") {
-            println!("Running Telegram interactive login...");
+            tracing::info!("Running Telegram interactive login...");
             let session = std::sync::Arc::new(grammers_session::storages::SqliteSession::open(&tg_config.session_file)?);
             let pool = grammers_mtsender::SenderPool::new(std::sync::Arc::clone(&session), tg_config.api_id);
             let client = grammers_client::Client::new(&pool);
             tokio::spawn(pool.runner.run());
             telegram::authorize_client(&client, &tg_config.api_hash, tg_config.bot_token.as_deref()).await?;
-            println!("Login complete. Session saved to {}", tg_config.session_file);
+            tracing::info!("Login complete. Session saved to {}", tg_config.session_file);
             return Ok(());
         }
 
         tokio::spawn(async move {
             if let Err(e) = telegram::run_bot(tg_config).await {
-                eprintln!("[telegram] bot error: {e}");
+                tracing::error!("[telegram] bot error: {e}");
             }
         });
     } else {
-        println!("Telegram credentials not set (RSDLP_TG_API_ID / RSDLP_TG_API_HASH). Running web-only mode.");
+        tracing::info!("Telegram credentials not set (RSDLP_TG_API_ID / RSDLP_TG_API_HASH). Running web-only mode.");
     }
 
     let app = Router::new()
@@ -111,13 +157,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .or_else(|_| std::env::var("BIND_ADDRESS"))
         .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
-    println!("listening on {bind_address}");
+    tracing::info!("listening on {bind_address}");
     axum::serve(listener, app).await?;
 
     Ok(())
 }
 
 async fn index_handler() -> Response {
+    tracing::debug!("GET / index");
     Response::builder()
         .header("Content-Type", "text/html; charset=utf-8")
         .body(Body::from(INDEX_HTML))
@@ -127,11 +174,12 @@ async fn index_handler() -> Response {
 async fn qualities_handler(
     Form(form): Form<QualitiesForm>,
 ) -> Result<Json<ytdlp::Qualities>, StatusCode> {
+    tracing::info!("qualities requested for url={}", form.url);
     let ytdlp = ytdlp::Ytdlp::new(&form.url, None);
 
     let info = ytdlp.get_info().await
         .map_err(|e| {
-            eprintln!("{e}");
+            tracing::error!("failed to get info for qualities: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::BAD_REQUEST)?;
@@ -144,9 +192,11 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
     let abr = parse_quality("abr", form.abr)?;
 
     if res.is_none() && abr.is_none() {
-        eprintln!("missing quality: at least one of res or abr must be specified");
+        tracing::warn!("missing quality: at least one of res or abr must be specified");
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    tracing::info!("starting download for url={}, res={:?}, abr={:?}", form.url, res, abr);
 
     let mut resp = Response::builder();
     let mut ytdlp = ytdlp::Ytdlp::new(&form.url, Some(ytdlp::build_sort(res, abr)));
@@ -154,7 +204,7 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
     {
         let info = ytdlp.get_info().await
             .map_err(|e| {
-                eprintln!("{e}");
+                tracing::error!("failed to get info for download: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .ok_or(StatusCode::BAD_REQUEST)?;
@@ -165,7 +215,7 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
 
     ytdlp.start_download()
         .map_err(|e| {
-            eprintln!("{e}");
+            tracing::error!("failed to start download: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -174,7 +224,7 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
 
     resp.body(body)
         .map_err(|e| {
-            eprintln!("{e}");
+            tracing::error!("failed to stream response body: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }
@@ -182,6 +232,45 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_determine_log_filter_env_overrides_cli() {
+        unsafe {
+            std::env::set_var("RSDLP_LOG", "debug");
+        }
+        let args = vec!["rsdlp".to_string(), "--log-level".to_string(), "error".to_string()];
+        assert_eq!(determine_log_filter(&args), "debug");
+
+        unsafe {
+            std::env::remove_var("RSDLP_LOG");
+        }
+    }
+
+    #[test]
+    fn test_determine_log_filter_cli_flag() {
+        unsafe {
+            std::env::remove_var("RSDLP_LOG");
+            std::env::remove_var("RUST_LOG");
+        }
+        let args = vec!["rsdlp".to_string(), "--log-level".to_string(), "warn".to_string()];
+        assert_eq!(determine_log_filter(&args), "warn");
+
+        let args_eq = vec!["rsdlp".to_string(), "--log=trace".to_string()];
+        assert_eq!(determine_log_filter(&args_eq), "trace");
+
+        let args_short = vec!["rsdlp".to_string(), "-l".to_string(), "error".to_string()];
+        assert_eq!(determine_log_filter(&args_short), "error");
+    }
+
+    #[test]
+    fn test_determine_log_filter_default() {
+        unsafe {
+            std::env::remove_var("RSDLP_LOG");
+            std::env::remove_var("RUST_LOG");
+        }
+        let args = vec!["rsdlp".to_string()];
+        assert_eq!(determine_log_filter(&args), "info");
+    }
 
     #[test]
     fn test_parse_dotenv_content() {
