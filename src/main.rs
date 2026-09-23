@@ -65,18 +65,6 @@ async fn index_handler() -> Response {
         .unwrap()
 }
 
-/// Build the `-S` sort expression from requested quality parameters.
-fn build_sort(res: Option<u64>, abr: Option<u64>) -> String {
-    let mut parts = Vec::new();
-    if let Some(res) = res {
-        parts.push(format!("res:{res}"));
-    }
-    if let Some(abr) = abr {
-        parts.push(format!("abr:{abr}"));
-    }
-    parts.join(",")
-}
-
 async fn qualities_handler(
     Form(form): Form<QualitiesForm>,
 ) -> Result<Json<ytdlp::Qualities>, StatusCode> {
@@ -93,8 +81,6 @@ async fn qualities_handler(
 }
 
 async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, StatusCode> {
-    use serde_json::Value;
-
     let res = parse_quality("res", form.res)?;
     let abr = parse_quality("abr", form.abr)?;
 
@@ -104,7 +90,7 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
     }
 
     let mut resp = Response::builder();
-    let mut ytdlp = ytdlp::Ytdlp::new(&form.url, Some(build_sort(res, abr)));
+    let mut ytdlp = ytdlp::Ytdlp::new(&form.url, Some(ytdlp::build_sort(res, abr)));
 
     {
         let info = ytdlp.get_info().await
@@ -114,38 +100,8 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
             })?
             .ok_or(StatusCode::BAD_REQUEST)?;
 
-        let requested_download = info.get("requested_downloads")
-            .and_then(Value::as_array)
-            .ok_or(StatusCode::BAD_REQUEST)?
-            .get(0)
-            .and_then(Value::as_object)
-            .ok_or(StatusCode::BAD_REQUEST)?;
-
-        let filename = requested_download
-            .get("filename")
-            .and_then(|value| {
-                match value {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                }
-            })
-            .unwrap_or_else(|| {
-                let ext = requested_download.get("ext")
-                    .and_then(Value::as_str)
-                    .unwrap_or("bin");
-                format!("unknown_title.{ext}")
-            });
-
+        let filename = ytdlp::extract_filename(&info);
         resp = resp.header("Content-Disposition", format!("attachment; filename=\"{filename}\""));
-
-        // use serde_json::Number;
-        // let filesize = requested_download.get("filesize_approx")
-        //     .and_then(Value::as_number)
-        //     .unwrap_or(&Number::from(0u64))
-        //     .as_u64();
-        // if let Some(filesize) = filesize && filesize > 0 {
-        //     resp = resp.header("Content-Length", format!("{filesize}"));
-        // }
     }
 
     ytdlp.start_download()

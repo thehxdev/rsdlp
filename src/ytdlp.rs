@@ -211,3 +211,83 @@ impl AsyncRead for Ytdlp {
         }
     }
 }
+
+/// Build the `-S` sort expression from requested quality parameters.
+pub fn build_sort(res: Option<u64>, abr: Option<u64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(res) = res {
+        parts.push(format!("res:{res}"));
+    }
+    if let Some(abr) = abr {
+        parts.push(format!("abr:{abr}"));
+    }
+    parts.join(",")
+}
+
+/// Extract downloaded filename or fallback from yt-dlp info json.
+pub fn extract_filename(info: &Value) -> String {
+    let requested_download = info
+        .get("requested_downloads")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.get(0))
+        .and_then(Value::as_object);
+
+    if let Some(dl) = requested_download {
+        if let Some(Value::String(s)) = dl.get("filename") {
+            return s.clone();
+        }
+        let ext = dl.get("ext").and_then(Value::as_str).unwrap_or("bin");
+        return format!("unknown_title.{ext}");
+    }
+
+    let ext = info.get("ext").and_then(Value::as_str).unwrap_or("bin");
+    format!("unknown_title.{ext}")
+}
+
+/// Extract media title or fallback from yt-dlp info json.
+pub fn extract_title(info: &Value) -> String {
+    info.get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Media")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_build_sort() {
+        assert_eq!(build_sort(Some(720), None), "res:720");
+        assert_eq!(build_sort(None, Some(192)), "abr:192");
+        assert_eq!(build_sort(Some(1080), Some(320)), "res:1080,abr:320");
+        assert_eq!(build_sort(None, None), "");
+    }
+
+    #[test]
+    fn test_extract_filename() {
+        let info = json!({
+            "requested_downloads": [
+                { "filename": "sample_video.mp4", "ext": "mp4" }
+            ]
+        });
+        assert_eq!(extract_filename(&info), "sample_video.mp4");
+
+        let fallback_info = json!({
+            "requested_downloads": [
+                { "ext": "mkv" }
+            ]
+        });
+        assert_eq!(extract_filename(&fallback_info), "unknown_title.mkv");
+    }
+
+    #[test]
+    fn test_extract_title() {
+        let info = json!({ "title": "My Test Video" });
+        assert_eq!(extract_title(&info), "My Test Video");
+
+        let empty = json!({});
+        assert_eq!(extract_title(&empty), "Media");
+    }
+}
