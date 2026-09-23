@@ -45,7 +45,30 @@ struct QualitiesForm {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if let Some(tg_config) = telegram::TelegramConfig::from_env() {
+        if args.iter().any(|arg| arg == "--tg-login") {
+            println!("Running Telegram interactive login...");
+            let session = std::sync::Arc::new(grammers_session::storages::SqliteSession::open(&tg_config.session_file)?);
+            let pool = grammers_mtsender::SenderPool::new(std::sync::Arc::clone(&session), tg_config.api_id);
+            let client = grammers_client::Client::new(&pool);
+            tokio::spawn(pool.runner.run());
+            telegram::authorize_client(&client, &tg_config.api_hash).await?;
+            println!("Login complete. Session saved to {}", tg_config.session_file);
+            return Ok(());
+        }
+
+        tokio::spawn(async move {
+            if let Err(e) = telegram::run_bot(tg_config).await {
+                eprintln!("[telegram] bot error: {e}");
+            }
+        });
+    } else {
+        println!("Telegram credentials not set (TG_API_ID / TG_API_HASH). Running web-only mode.");
+    }
+
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/download", post(download_handler))
