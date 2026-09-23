@@ -24,7 +24,9 @@
   }
   h1 { margin: 0 0 .5rem; font-size: 1.3rem; }
   p  { margin: 0 0 1.25rem; color: #666; }
-  form { display: flex; gap: .5rem; }
+  form { display: flex; flex-direction: column; gap: .75rem; }
+  .top { display: flex; gap: .5rem; }
+  .top button { white-space: nowrap; }
   input[type="url"] {
     flex: 1;
     min-width: 0;
@@ -42,6 +44,28 @@
     font: inherit;
     cursor: pointer;
   }
+  button.secondary { background: #6b7280; }
+  button:disabled { opacity: .65; cursor: default; }
+  .picks { display: flex; gap: .75rem; }
+  .picks label {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+    font-size: .85rem;
+    color: #555;
+  }
+  select {
+    width: 100%;
+    padding: .55rem .6rem;
+    border: 1px solid #bbb;
+    border-radius: 8px;
+    font: inherit;
+    background: #fff;
+  }
+  select:disabled { color: #999; background: #f0f0f2; }
+  .error { margin: 0; color: #b91c1c; font-size: .9rem; }
+  [hidden] { display: none !important; }
   small { display: block; margin-top: 1rem; color: #888; }
 </style>
 </head>
@@ -50,10 +74,142 @@
   <h1>rsdlp</h1>
   <p>Paste a media URL to stream it from the local yt-dlp API.</p>
   <form method="post" action="/download">
-    <input type="url" name="url" placeholder="https://…" required autofocus>
-    <button type="submit">Download</button>
+    <div class="top">
+      <input type="url" name="url" id="url" placeholder="https://…" required autofocus>
+      <button type="button" id="fetch" class="secondary">Fetch qualities</button>
+    </div>
+    <div class="picks" id="picks" hidden>
+      <label>Video resolution
+        <select name="res" id="res" disabled></select>
+      </label>
+      <label>Audio bitrate
+        <select name="abr" id="abr" disabled></select>
+      </label>
+    </div>
+    <button type="submit" id="download" hidden>Download</button>
+    <p class="error" id="error" hidden></p>
   </form>
   <small>The API streams the media back as-is; the file is saved under a browser-chosen name.</small>
 </main>
+<script>
+  const form = document.querySelector('form');
+  const urlInput = document.getElementById('url');
+  const fetchBtn = document.getElementById('fetch');
+  const downloadBtn = document.getElementById('download');
+  const picks = document.getElementById('picks');
+  const resSel = document.getElementById('res');
+  const abrSel = document.getElementById('abr');
+  const errorEl = document.getElementById('error');
+
+  let qualitiesData = null;
+
+  // Drop stale picks and hide download so choices only apply to the fetched URL.
+  function resetPicks() {
+    picks.hidden = true;
+    downloadBtn.hidden = true;
+    resSel.innerHTML = '';
+    abrSel.innerHTML = '';
+    resSel.disabled = true;
+    abrSel.disabled = true;
+    qualitiesData = null;
+  }
+
+  function updateDownloadVisibility() {
+    if (!qualitiesData) {
+      downloadBtn.hidden = true;
+      return;
+    }
+    const hasRes = !resSel.disabled && resSel.value !== '';
+    const hasAbr = !abrSel.disabled && abrSel.value !== '';
+    const chosen = qualitiesData.video.length > 0 ? hasRes : hasAbr;
+    downloadBtn.hidden = !chosen;
+  }
+
+  function fill(select, placeholder, values, format) {
+    select.innerHTML = '';
+    const promptOption = document.createElement('option');
+    promptOption.value = '';
+    promptOption.textContent = placeholder;
+    promptOption.disabled = true;
+    promptOption.selected = true;
+    select.appendChild(promptOption);
+
+    if (values.length === 0) {
+      promptOption.textContent = 'None available';
+      select.disabled = true;
+      return;
+    }
+
+    for (const value of values) {
+      const option = document.createElement('option');
+      option.value = String(value);
+      option.textContent = format(value);
+      select.appendChild(option);
+    }
+    select.disabled = false;
+  }
+
+  fetchBtn.addEventListener('click', async () => {
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      return;
+    }
+
+    errorEl.hidden = true;
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = 'Fetching…';
+
+    try {
+      const response = await fetch('/qualities', {
+        method: 'POST',
+        body: new URLSearchParams({ url: urlInput.value }),
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const qualities = await response.json();
+
+      resetPicks();
+      qualitiesData = qualities;
+
+      if (qualities.video.length === 0 && qualities.audio.length === 0) {
+        errorEl.textContent = 'No playable formats found for this URL.';
+        errorEl.hidden = false;
+        return;
+      }
+
+      fill(resSel, 'Choose resolution…', qualities.video.slice().reverse(), value => value + 'p');
+
+      if (qualities.video.length > 0) {
+        fill(abrSel, 'Auto (best)', qualities.audio.slice().reverse(), value => value + ' kbps');
+        if (qualities.audio.length > 0) {
+          abrSel.options[0].disabled = false;
+        }
+      } else {
+        fill(abrSel, 'Choose bitrate…', qualities.audio.slice().reverse(), value => value + ' kbps');
+      }
+
+      picks.hidden = false;
+      updateDownloadVisibility();
+    } catch {
+      resetPicks();
+      errorEl.textContent = 'Could not fetch qualities for this URL.';
+      errorEl.hidden = false;
+    } finally {
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = 'Fetch qualities';
+    }
+  });
+
+  resSel.addEventListener('change', updateDownloadVisibility);
+  abrSel.addEventListener('change', updateDownloadVisibility);
+
+  urlInput.addEventListener('input', resetPicks);
+
+  form.addEventListener('submit', (e) => {
+    if (downloadBtn.hidden) {
+      e.preventDefault();
+      fetchBtn.click();
+    }
+  });
+</script>
 </body>
 </html>

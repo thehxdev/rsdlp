@@ -1,12 +1,16 @@
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, Result};
 use tokio::process::{ChildStdout, Command};
 use tokio::sync::watch;
+use serde::Serialize;
 use serde_json::Value;
 
 const BINARY: &str = "yt-dlp";
+// NOTE: `-S` is deliberately not part of these. It is appended per request so
+// the caller can choose the quality: `-S res:<px>,abr:<kbps>`.
 const COMMON_FLAGS: &[&str] = &[
     // "-v",
     "--abort-on-error",
@@ -16,20 +20,38 @@ const COMMON_FLAGS: &[&str] = &[
     "--no-embed-thumbnail",
     "--no-embed-metadata",
     "-f", "b/bv*+ba",
-    "-S", "res:720",
 ];
+
+/// Well-known quality steps, so the UI only ever offers standard
+/// alternatives (360p/480p/720p/… and 128/192/320 kbps).
+const VIDEO_STEPS: &[u64] = &[144, 240, 360, 480, 720, 1080, 1440, 2160, 4320];
+const AUDIO_STEPS: &[u64] = &[128, 192, 320];
+
+/// The resolutions a media offers, in the units of the matching `-S` field:
+/// `video` is the smallest dimension in pixels (`-S res`), `audio` is the
+/// average bitrate in kbps (`-S abr`). Each value is rounded **up** to the
+/// next standard step — `-S` is a cap that prefers the best format at or
+/// below it, so every offered step still selects an existing format.
+/// Sorted ascending, deduplicated.
+#[derive(Debug, Serialize)]
+pub struct Qualities {
+    pub video: Vec<u64>,
+    pub audio: Vec<u64>,
+}
 
 #[derive(Debug)]
 pub struct Ytdlp {
     url: String,
+    sort: Option<String>,
     child_stdout: Option<ChildStdout>,
     canceler: Option<watch::Sender<()>>,
 }
 
 impl Ytdlp {
-    pub fn new(url: &str) -> Self {
+    pub fn new(url: &str, sort: Option<String>) -> Self {
         Self {
             url: String::from(url),
+            sort,
             child_stdout: None,
             canceler: None,
         }
@@ -41,6 +63,9 @@ impl Ytdlp {
             &self.url
         ];
         ytdlp_args.extend_from_slice(COMMON_FLAGS);
+        if let Some(sort) = &self.sort {
+            ytdlp_args.extend(["-S", sort.as_str()]);
+        }
 
         let output = Command::new(BINARY)
             .args(&ytdlp_args)
@@ -61,6 +86,9 @@ impl Ytdlp {
             &self.url
         ];
         ytdlp_args.extend_from_slice(COMMON_FLAGS);
+        if let Some(sort) = &self.sort {
+            ytdlp_args.extend(["-S", sort.as_str()]);
+        }
 
         let mut child = Command::new(BINARY)
             .args(&ytdlp_args)
@@ -101,6 +129,64 @@ impl Ytdlp {
         });
 
         Ok(())
+    }
+}
+
+/// Round values up onto the standard steps and re-deduplicate.
+fn snap(values: &BTreeSet<u64>, steps: &[u64]) -> Vec<u64> {
+    values
+        .iter()
+        .map(|&value| {
+            steps
+                .iter()
+                .copied()
+                .find(|&step| step >= value)
+                .unwrap_or(value)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Extract the available resolutions from a `yt-dlp -J` info dict.
+///
+/// Video formats are described by their dimensions in pixels, audio-only
+/// formats by their bitrate in kbps — hence the two lists with two units.
+pub fn extract_qualities(info: &Value) -> Qualities {
+    let mut video = BTreeSet::new();
+    let mut audio = BTreeSet::new();
+
+    let formats = info
+        .get("formats")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    for format in formats {
+        let vcodec = format.get("vcodec").and_then(Value::as_str);
+        let acodec = format.get("acodec").and_then(Value::as_str);
+        let width = format.get("width").and_then(Value::as_u64);
+        let height = format.get("height").and_then(Value::as_u64);
+
+        // `-S res` sorts by the smallest dimension, so offer exactly that.
+        if vcodec != Some("none")
+            && let Some(height) = height
+        {
+            video.insert(width.map_or(height, |width| width.min(height)));
+        }
+
+        if acodec != Some("none") {
+            // `abr` can be fractional (e.g. bilibili's 68.646). Ceil it so the
+            // offered value still covers the format when used as `-S abr:N`.
+            if let Some(abr) = format.get("abr").and_then(Value::as_f64) {
+                audio.insert(abr.ceil() as u64);
+            }
+        }
+    }
+
+    Qualities {
+        video: snap(&video, VIDEO_STEPS),
+        audio: snap(&audio, AUDIO_STEPS),
     }
 }
 
