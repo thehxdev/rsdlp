@@ -167,6 +167,11 @@ pub fn build_qualities_inline_markup(qualities: &Qualities) -> reply_markup::Inl
     reply_markup::inline(rows)
 }
 
+/// Builds inline markup containing a Cancel button.
+pub fn cancel_markup() -> reply_markup::Inline {
+    reply_markup::inline(vec![vec![button::inline("❌ Cancel", "cancel")]])
+}
+
 /// Parses inline button callback data into corresponding TelegramAction.
 pub fn parse_callback_action(data: &[u8]) -> TelegramAction {
     let s = match std::str::from_utf8(data) {
@@ -303,20 +308,34 @@ pub async fn authorize_client(
     }
 }
 
-struct PendingChoice {
-    url: String,
-    title: String,
+pub struct PendingChoice {
+    pub url: String,
+    pub title: String,
 }
 
 pub struct BotState {
-    pending: Mutex<HashMap<PeerId, PendingChoice>>,
+    pub pending: Mutex<HashMap<PeerId, PendingChoice>>,
+    pub active_operations: Mutex<HashMap<PeerId, tokio::task::AbortHandle>>,
 }
 
 impl BotState {
     pub fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
+            active_operations: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub async fn cancel(&self, peer_id: &PeerId) -> bool {
+        let mut cancelled = false;
+        if self.pending.lock().await.remove(peer_id).is_some() {
+            cancelled = true;
+        }
+        if let Some(handle) = self.active_operations.lock().await.remove(peer_id) {
+            handle.abort();
+            cancelled = true;
+        }
+        cancelled
     }
 }
 
@@ -396,11 +415,13 @@ async fn handle_callback_query(
 
     match action {
         TelegramAction::Cancel => {
-            state.pending.lock().await.remove(&peer_id);
-            let _ = query
-                .answer()
-                .edit(InputMessage::new().text("❌ Current operation cancelled."))
-                .await;
+            let was_cancelled = state.cancel(&peer_id).await;
+            let text = if was_cancelled {
+                "❌ Operation cancelled."
+            } else {
+                "Nothing to cancel."
+            };
+            let _ = query.answer().edit(InputMessage::new().text(text)).await;
         }
         TelegramAction::SelectQuality { res, abr } => {
             let pending_opt = state.pending.lock().await.remove(&peer_id);
@@ -416,21 +437,47 @@ async fn handle_callback_query(
                 }
             };
 
+            let _ = query.answer().send().await;
+
             let desc = match (res, abr) {
                 (Some(r), _) => format!("{r}p"),
                 (None, Some(a)) => format!("{a} kbps audio"),
                 (None, None) => "best quality".to_string(),
             };
 
-            let _ = query
-                .answer()
-                .edit(InputMessage::new().text(format!(
-                    "⏳ Downloading {} ({desc})...",
-                    pending.title
-                )))
-                .await;
+            let peer = query.peer().clone();
+            let msg_id = query.load_message().await.map(|m| m.id()).ok();
 
-            execute_download_and_upload(&client, query.peer(), pending, res, abr, &desc).await?;
+            let state_clone = Arc::clone(&state);
+            let client_clone = client.clone();
+            let peer_id_copy = peer_id;
+
+            let join_handle = tokio::spawn(async move {
+                let res = execute_download_and_upload(
+                    &client_clone,
+                    &peer,
+                    pending,
+                    res,
+                    abr,
+                    &desc,
+                    msg_id,
+                )
+                .await;
+                state_clone
+                    .active_operations
+                    .lock()
+                    .await
+                    .remove(&peer_id_copy);
+                if let Err(e) = res {
+                    eprintln!("[telegram] download/upload error: {e}");
+                }
+            });
+
+            state
+                .active_operations
+                .lock()
+                .await
+                .insert(peer_id, join_handle.abort_handle());
         }
         _ => {
             let _ = query.answer().send().await;
@@ -455,10 +502,13 @@ async fn handle_message(
             message.respond(InputMessage::new().text(help_text)).await?;
         }
         TelegramAction::Cancel => {
-            state.pending.lock().await.remove(&peer_id);
-            message
-                .respond(InputMessage::new().text("❌ Current operation cancelled."))
-                .await?;
+            let was_cancelled = state.cancel(&peer_id).await;
+            let text = if was_cancelled {
+                "❌ Operation cancelled."
+            } else {
+                "Nothing to cancel."
+            };
+            message.respond(InputMessage::new().text(text)).await?;
         }
         TelegramAction::DownloadUrl { url } => {
             let status_msg = message
@@ -520,22 +570,37 @@ async fn handle_message(
                 (None, None) => "best quality".to_string(),
             };
 
-            message
-                .respond(InputMessage::new().text(format!(
-                    "⏳ Downloading {} ({desc})...",
-                    pending.title
-                )))
-                .await?;
+            let peer_ref = peer_ref_from_message(&message);
+            let state_clone = Arc::clone(&state);
+            let client_clone = client.clone();
+            let peer_id_copy = peer_id;
 
-            execute_download_and_upload(
-                &client,
-                peer_ref_from_message(&message),
-                pending,
-                res,
-                abr,
-                &desc,
-            )
-            .await?;
+            let join_handle = tokio::spawn(async move {
+                let res = execute_download_and_upload(
+                    &client_clone,
+                    peer_ref,
+                    pending,
+                    res,
+                    abr,
+                    &desc,
+                    None,
+                )
+                .await;
+                state_clone
+                    .active_operations
+                    .lock()
+                    .await
+                    .remove(&peer_id_copy);
+                if let Err(e) = res {
+                    eprintln!("[telegram] download/upload error: {e}");
+                }
+            });
+
+            state
+                .active_operations
+                .lock()
+                .await
+                .insert(peer_id, join_handle.abort_handle());
         }
         TelegramAction::Unknown => {}
     }
@@ -550,6 +615,7 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     res: Option<u64>,
     abr: Option<u64>,
     desc: &str,
+    status_msg_id: Option<i32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let peer_ref = peer.into();
     let sort_str = ytdlp::build_sort(res, abr);
@@ -561,6 +627,21 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
             Some(sort_str)
         },
     );
+
+    let downloading_msg = InputMessage::new()
+        .text(format!("⏳ Downloading {} ({desc})...", pending.title))
+        .reply_markup(&cancel_markup());
+
+    let status_msg_id = match status_msg_id {
+        Some(id) => {
+            let _ = client.edit_message(peer_ref, id, downloading_msg).await;
+            id
+        }
+        None => {
+            let msg = client.send_message(peer_ref, downloading_msg).await?;
+            msg.id()
+        }
+    };
 
     let filename = match ytdlp.get_info().await {
         Ok(Some(info)) => ytdlp::extract_filename(&info),
@@ -587,15 +668,22 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     .await;
 
     if let Err(e) = download_res {
-        client
-            .send_message(peer_ref, InputMessage::new().text(format!("Download failed: {e}")))
-            .await?;
+        let _ = client
+            .edit_message(
+                peer_ref,
+                status_msg_id,
+                InputMessage::new().text(format!("Download failed: {e}")),
+            )
+            .await;
         return Ok(());
     }
 
-    let upload_msg = client
-        .send_message(peer_ref, InputMessage::new().text("📤 Uploading to Telegram..."))
-        .await?;
+    let uploading_msg = InputMessage::new()
+        .text(format!("📤 Uploading {} to Telegram...", pending.title))
+        .reply_markup(&cancel_markup());
+    let _ = client
+        .edit_message(peer_ref, status_msg_id, uploading_msg)
+        .await;
 
     let upload_res = client.upload_file(guard.path()).await;
 
@@ -604,12 +692,16 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
             let caption = format!("🎬 {}\nQuality: {desc}", pending.title);
             let input_file = InputMessage::new().file(uploaded).text(caption);
             client.send_message(peer_ref, input_file).await?;
-            let _ = upload_msg.delete().await;
+            let _ = client.delete_messages(peer_ref, &[status_msg_id]).await;
         }
         Err(e) => {
-            upload_msg
-                .edit(InputMessage::new().text(format!("Upload failed: {e}")))
-                .await?;
+            let _ = client
+                .edit_message(
+                    peer_ref,
+                    status_msg_id,
+                    InputMessage::new().text(format!("Upload failed: {e}")),
+                )
+                .await;
         }
     }
 
@@ -715,6 +807,65 @@ mod tests {
             audio: vec![128, 320],
         };
         let _markup = build_qualities_inline_markup(&qualities);
+    }
+
+    #[test]
+    fn test_cancel_markup() {
+        let _markup = cancel_markup();
+    }
+
+    #[tokio::test]
+    async fn test_bot_state_cancel() {
+        let state = BotState::new();
+        let peer_id = PeerId::user(42);
+
+        // Test cancel on empty state
+        assert!(!state.cancel(&peer_id).await);
+
+        // Test cancel with pending choice
+        state.pending.lock().await.insert(
+            peer_id,
+            PendingChoice {
+                url: "https://example.com".to_string(),
+                title: "Example".to_string(),
+            },
+        );
+        assert!(state.cancel(&peer_id).await);
+        assert!(!state.cancel(&peer_id).await);
+
+        // Test cancel with active operation
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+        state
+            .active_operations
+            .lock()
+            .await
+            .insert(peer_id, handle.abort_handle());
+        assert!(state.cancel(&peer_id).await);
+        assert!(!state.cancel(&peer_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_temp_file_deleted_on_task_abort() {
+        let path = std::env::temp_dir().join(format!(
+            "rsdlp_abort_test_{}.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"abort payload").expect("create file");
+        assert!(path.exists());
+
+        let path_clone = path.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = TempFileGuard::new(path_clone);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(!path.exists(), "temp file must be deleted when task is aborted");
     }
 
     #[test]

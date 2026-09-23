@@ -54,7 +54,8 @@ Environment variables can be stored in a `.env` file (copy from `.env.example`).
 - Send any media URL to the bot in a private chat (or in **Saved Messages** if running on a user account).
 - The bot fetches available formats and replies with interactive inline buttons (`1080p`, `720p`, `🎵 320k`, `⚡ Best`, `❌ Cancel`) as well as clickable fallback text commands.
 - Tap any button to download and upload the media file directly in Telegram.
-- Tap **❌ Cancel** (or send `/cancel`) to abort.
+- Both download and upload progress messages display an interactive **❌ Cancel** button.
+- Tap **❌ Cancel** (or send `/cancel`) at any stage to immediately abort running downloads, kill background processes (SIGTERM to the process group), abort uploads, and wipe all temporary files.
 - All temporary files are wrapped with an RAII cleanup guard (`TempFileGuard`) guaranteeing files are immediately deleted from disk when upload finishes, when an error occurs, or upon cancellation.
 
 ### Streaming Architecture Note
