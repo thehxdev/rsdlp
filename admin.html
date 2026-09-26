@@ -189,6 +189,33 @@
         <div id="tg-cfg-msg" class="msg ok" hidden></div>
       </form>
     </div>
+
+    <!-- Provider Blacklist Card -->
+    <div class="card">
+      <h2>Media Provider Blacklist</h2>
+      <p>Block heavy media providers from download to save server CPU and bandwidth. Blocked providers return an informative notice to users.</p>
+      
+      <div style="margin-bottom: 1rem;">
+        <strong>Quick Presets:</strong>
+        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;">
+          <button type="button" id="toggle-yt-btn" class="secondary">Toggle YouTube (youtube.com, youtu.be)</button>
+          <button type="button" id="toggle-vimeo-btn" class="secondary">Toggle Vimeo (vimeo.com)</button>
+        </div>
+      </div>
+
+      <form id="blacklist-add-form" style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+        <input type="text" id="blacklist-domain-input" placeholder="e.g. youtube.com or tiktok.com" required style="flex: 1;">
+        <button type="submit" class="secondary">Add Domain</button>
+      </form>
+      <div id="blacklist-msg" class="msg" hidden></div>
+
+      <div style="margin-top: 0.5rem;">
+        <label style="font-weight: 600; display: block; margin-bottom: 0.5rem;">Currently Blacklisted Domains:</label>
+        <div id="blacklist-tags" style="display: flex; gap: 0.5rem; flex-wrap: wrap; min-height: 28px;">
+          <em style="color: #666; font-size: 0.85rem;">Loading blacklist...</em>
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -390,9 +417,104 @@
     checkAuthAndLoad();
   };
 
+  // Blacklist Management
+  async function loadBlacklist() {
+    try {
+      const res = await fetch('/api/admin/blacklist');
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = data.blacklist || [];
+      const tagsContainer = $('blacklist-tags');
+      tagsContainer.innerHTML = '';
+      if (list.length === 0) {
+        tagsContainer.innerHTML = '<em style="color: #888; font-size: 0.85rem;">No domains currently blacklisted. All supported media providers allowed.</em>';
+        return;
+      }
+      for (const domain of list) {
+        const tag = document.createElement('span');
+        tag.className = 'badge gray';
+        tag.style.display = 'inline-flex';
+        tag.style.alignItems = 'center';
+        tag.style.gap = '0.4rem';
+        tag.style.padding = '0.3rem 0.6rem';
+        tag.innerHTML = `<span>${domain}</span><button type="button" style="background:none;border:none;color:#b91c1c;font-weight:bold;cursor:pointer;padding:0;font-size:1rem;line-height:1;" title="Remove domain">&times;</button>`;
+        tag.querySelector('button').onclick = async () => {
+          await fetch('/api/admin/blacklist/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+          });
+          loadBlacklist();
+        };
+        tagsContainer.appendChild(tag);
+      }
+    } catch (_) {}
+  }
+
+  $('blacklist-add-form').onsubmit = async e => {
+    e.preventDefault();
+    const domain = $('blacklist-domain-input').value.trim();
+    if (!domain) return;
+    const res = await fetch('/api/admin/blacklist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain })
+    });
+    if (res.ok) {
+      $('blacklist-domain-input').value = '';
+      loadBlacklist();
+    }
+  };
+
+  $('toggle-yt-btn').onclick = async () => {
+    const res = await fetch('/api/admin/blacklist');
+    const data = await res.json();
+    const list = data.blacklist || [];
+    const hasYt = list.includes('youtube.com');
+    if (hasYt) {
+      await fetch('/api/admin/blacklist/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'youtube.com' })
+      });
+      await fetch('/api/admin/blacklist/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'youtu.be' })
+      });
+    } else {
+      await fetch('/api/admin/blacklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'youtube.com' })
+      });
+      await fetch('/api/admin/blacklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'youtu.be' })
+      });
+    }
+    loadBlacklist();
+  };
+
+  $('toggle-vimeo-btn').onclick = async () => {
+    const res = await fetch('/api/admin/blacklist');
+    const data = await res.json();
+    const list = data.blacklist || [];
+    const hasVimeo = list.includes('vimeo.com');
+    const endpoint = hasVimeo ? '/api/admin/blacklist/delete' : '/api/admin/blacklist';
+    await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain: 'vimeo.com' })
+    });
+    loadBlacklist();
+  };
+
   // Init
   checkAuthAndLoad();
   loadTelegramConfig();
+  loadBlacklist();
 </script>
 </body>
 </html>

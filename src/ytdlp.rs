@@ -12,10 +12,13 @@ const BINARY: &str = "yt-dlp";
 // NOTE: `-S` is deliberately not part of these. It is appended per request so
 // the caller can choose the quality: `-S res:<px>,abr:<kbps>`.
 const COMMON_FLAGS: &[&str] = &[
-    // "-v",
     "--abort-on-error",
     "--no-playlist",
     "--retries", "5",
+    "--concurrent-fragments", "4",
+    "--buffer-size", "16M",
+    "--http-chunk-size", "10M",
+    "--postprocessor-args", "Merger:-c copy",
     "--downloader-args", "ffmpeg:-preset ultrafast -c copy",
     "--no-embed-thumbnail",
     "--no-embed-metadata",
@@ -289,5 +292,11 @@ mod tests {
 
         let empty = json!({});
         assert_eq!(extract_title(&empty), "Media");
+    }
+
+    #[test]
+    fn test_common_flags_has_optimization() {
+        assert!(COMMON_FLAGS.contains(&"--concurrent-fragments"));
+        assert!(COMMON_FLAGS.contains(&"Merger:-c copy"));
     }
 }

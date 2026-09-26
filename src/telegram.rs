@@ -272,6 +272,7 @@ pub struct BotState {
     pub pending: Mutex<HashMap<PeerId, PendingChoice>>,
     pub active_operations: Mutex<HashMap<PeerId, tokio::task::AbortHandle>>,
     pub staging_dir: PathBuf,
+    pub db: Option<crate::db::Database>,
 }
 
 impl BotState {
@@ -281,6 +282,7 @@ impl BotState {
             pending: Mutex::new(HashMap::new()),
             active_operations: Mutex::new(HashMap::new()),
             staging_dir: std::env::temp_dir(),
+            db: None,
         }
     }
 
@@ -289,6 +291,16 @@ impl BotState {
             pending: Mutex::new(HashMap::new()),
             active_operations: Mutex::new(HashMap::new()),
             staging_dir,
+            db: None,
+        }
+    }
+
+    pub fn new_with_db(staging_dir: PathBuf, db: crate::db::Database) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            active_operations: Mutex::new(HashMap::new()),
+            staging_dir,
+            db: Some(db),
         }
     }
 
@@ -433,9 +445,10 @@ impl TelegramManager {
         *self.bot_info.write().await = None;
 
         let staging = self.staging_dir.clone();
+        let db_clone = self.db.clone();
         let info_clone = Arc::clone(&self.bot_info);
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_bot_service(cfg, staging, info_clone).await {
+            if let Err(e) = run_bot_service(cfg, staging, Some(db_clone), info_clone).await {
                 tracing::error!("[telegram] bot error: {e}");
             }
         });
@@ -487,12 +500,13 @@ pub async fn run_bot(
     config: TelegramConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bot_info = Arc::new(tokio::sync::RwLock::new(None));
-    run_bot_service(config, std::env::temp_dir(), bot_info).await
+    run_bot_service(config, std::env::temp_dir(), None, bot_info).await
 }
 
 pub async fn run_bot_service(
     config: TelegramConfig,
     staging_dir: PathBuf,
+    db: Option<crate::db::Database>,
     bot_info: Arc<tokio::sync::RwLock<Option<BotInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _guard = BotInfoGuard(Arc::clone(&bot_info));
@@ -525,7 +539,10 @@ pub async fn run_bot_service(
         api_id: config.api_id,
     });
 
-    let state = Arc::new(BotState::new_with_staging(staging_dir));
+    let state = match db {
+        Some(database) => Arc::new(BotState::new_with_db(staging_dir, database)),
+        None => Arc::new(BotState::new_with_staging(staging_dir)),
+    };
     let mut update_stream = client.stream_updates(
         pool.updates,
         UpdatesConfiguration {
@@ -681,6 +698,16 @@ async fn handle_message(
             message.respond(InputMessage::new().text(text)).await?;
         }
         TelegramAction::DownloadUrl { url } => {
+            if let Some(db) = &state.db {
+                if let Ok(Some(domain)) = db.check_url_blacklisted(&url) {
+                    let notice = format!(
+                        "⚠️ Provider Disabled\n\nThis media provider ('{domain}') is currently disabled because processing its streams is a heavy operation that requires intensive CPU and server resources."
+                    );
+                    message.respond(InputMessage::new().text(notice)).await?;
+                    return Ok(());
+                }
+            }
+
             let status_msg = message
                 .respond(InputMessage::new().text("🔍 Fetching qualities..."))
                 .await?;

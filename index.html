@@ -164,7 +164,19 @@
         method: 'POST',
         body: new URLSearchParams({ url: urlInput.value }),
       });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
+      if (!response.ok) {
+        let errMsg = 'Could not fetch qualities for this URL.';
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          }
+        } catch (_) {}
+        resetPicks();
+        errorEl.textContent = errMsg;
+        errorEl.hidden = false;
+        return;
+      }
       const qualities = await response.json();
 
       resetPicks();

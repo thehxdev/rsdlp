@@ -43,6 +43,14 @@ Environment variables can be stored in a `.env` file (copy from `.env.example`).
 - **Telegram Bot Integration**: Configure API ID, API Hash, and Bot Token directly through the browser. Bot token login operates via MTProto (`client.bot_sign_in`) without requiring phone numbers, SMS codes, or 2FA credentials.
 - **Modular Backend**: If Telegram is unconfigured or stopped, the web server (`/`, `/qualities`, `/download`, `/admin`) operates in standalone mode without errors.
 - **Storage & Disk Safety**: Media files staged for Telegram uploads reside in `${RSDLP_DATA_DIR}/downloads`. The panel displays partition disk metrics (used/free/total) and includes a manual trigger to prune stale temp files. Unhandled crashes are automatically cleaned up on next boot.
+- **Media Provider Blacklist**: Blacklist heavy media providers (e.g. `youtube.com`, `youtu.be`) to protect server CPU. When a user requests a blacklisted provider via Web or Telegram, they are promptly notified that the provider is disabled due to heavy computational resource usage. Managed directly in `/admin`.
+
+## YouTube Acceleration & Stream Copy
+
+Downloads from streaming providers like YouTube are tuned for speed and minimal CPU overhead:
+- `--concurrent-fragments 4` downloads DASH video/audio chunks in parallel.
+- `--postprocessor-args "Merger:-c copy"` guarantees `ffmpeg` stream-copies when merging video and audio without re-encoding.
+- Buffer size (`16M`) and HTTP chunk size (`10M`) optimizations reduce network I/O overhead.
 
 ## Docker Deployment
 

@@ -30,6 +30,10 @@ impl Database {
             CREATE TABLE IF NOT EXISTS admin_sessions (
                 token TEXT PRIMARY KEY,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS blacklist (
+                domain TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
             );",
         )
         .map_err(|e| e.to_string())?;
@@ -151,6 +155,87 @@ impl Database {
         stmt.next().map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn get_blacklist(&self) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT domain FROM blacklist ORDER BY domain ASC")
+            .map_err(|e| e.to_string())?;
+        let mut list = Vec::new();
+        while stmt.next().map_err(|e| e.to_string())? == sqlite::State::Row {
+            let d: String = stmt.read(0).map_err(|e| e.to_string())?;
+            list.push(d);
+        }
+        Ok(list)
+    }
+
+    pub fn add_blacklist(&self, domain: &str) -> Result<(), String> {
+        let normalized = domain.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err("Domain cannot be empty".to_string());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("INSERT OR IGNORE INTO blacklist (domain, created_at) VALUES (?, ?)")
+            .map_err(|e| e.to_string())?;
+        stmt.bind((1, normalized.as_str())).map_err(|e| e.to_string())?;
+        stmt.bind((2, now as i64)).map_err(|e| e.to_string())?;
+        stmt.next().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn remove_blacklist(&self, domain: &str) -> Result<(), String> {
+        let normalized = domain.trim().to_lowercase();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("DELETE FROM blacklist WHERE domain = ?")
+            .map_err(|e| e.to_string())?;
+        stmt.bind((1, normalized.as_str())).map_err(|e| e.to_string())?;
+        stmt.next().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn check_url_blacklisted(&self, url: &str) -> Result<Option<String>, String> {
+        let Some(host) = extract_domain(url) else {
+            return Ok(None);
+        };
+        let list = self.get_blacklist()?;
+        for domain in list {
+            let d = domain.to_lowercase();
+            if host == d || host.ends_with(&format!(".{d}")) {
+                return Ok(Some(domain));
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub fn extract_domain(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let without_scheme = if let Some(rest) = trimmed.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        rest
+    } else {
+        trimmed
+    };
+
+    let host_part = without_scheme
+        .split(['/', '?', '#', ':'])
+        .next()?
+        .trim()
+        .to_lowercase();
+
+    if host_part.is_empty() {
+        None
+    } else {
+        Some(host_part)
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +264,80 @@ mod tests {
         assert!(db.validate_session(&token).expect("validate session"));
         db.delete_session(&token).expect("delete session");
         assert!(!db.validate_session(&token).expect("validate deleted session"));
+
+        let _ = std::fs::remove_file(&test_db_path);
+    }
+
+    #[test]
+    fn test_extract_domain() {
+        assert_eq!(
+            extract_domain("https://www.youtube.com/watch?v=123"),
+            Some("www.youtube.com".to_string())
+        );
+        assert_eq!(
+            extract_domain("http://youtu.be/abc?t=10"),
+            Some("youtu.be".to_string())
+        );
+        assert_eq!(
+            extract_domain("https://example.com:8080/path"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(extract_domain("invalid-url"), Some("invalid-url".to_string()));
+    }
+
+    #[test]
+    fn test_blacklist_crud_and_check() {
+        let test_db_path = format!(
+            "test_db_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let db = Database::open(&test_db_path).expect("open db");
+
+        assert_eq!(db.get_blacklist().expect("list"), Vec::<String>::new());
+        assert_eq!(
+            db.check_url_blacklisted("https://www.youtube.com/watch?v=123")
+                .expect("check"),
+            None
+        );
+
+        db.add_blacklist("youtube.com").expect("add youtube");
+        db.add_blacklist("youtu.be").expect("add youtu.be");
+
+        assert_eq!(
+            db.check_url_blacklisted("https://www.youtube.com/watch?v=123")
+                .expect("check"),
+            Some("youtube.com".to_string())
+        );
+        assert_eq!(
+            db.check_url_blacklisted("https://m.youtube.com/watch?v=123")
+                .expect("check"),
+            Some("youtube.com".to_string())
+        );
+        assert_eq!(
+            db.check_url_blacklisted("https://youtu.be/123")
+                .expect("check"),
+            Some("youtu.be".to_string())
+        );
+        assert_eq!(
+            db.check_url_blacklisted("https://soundcloud.com/track")
+                .expect("check"),
+            None
+        );
+
+        db.remove_blacklist("youtube.com").expect("remove youtube");
+        assert_eq!(
+            db.check_url_blacklisted("https://www.youtube.com/watch?v=123")
+                .expect("check"),
+            None
+        );
+        assert_eq!(
+            db.check_url_blacklisted("https://youtu.be/123")
+                .expect("check"),
+            Some("youtu.be".to_string())
+        );
 
         let _ = std::fs::remove_file(&test_db_path);
     }

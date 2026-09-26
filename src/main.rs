@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::Form,
+    extract::{Form, State},
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -174,6 +174,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/admin/telegram/start", post(admin::admin_tg_start_handler))
         .route("/api/admin/telegram/stop", post(admin::admin_tg_stop_handler))
         .route("/api/admin/telegram/disconnect", post(admin::admin_tg_disconnect_handler))
+        .route(
+            "/api/admin/blacklist",
+            get(admin::admin_blacklist_get_handler).post(admin::admin_blacklist_add_handler),
+        )
+        .route(
+            "/api/admin/blacklist/delete",
+            post(admin::admin_blacklist_remove_handler),
+        )
         .with_state(app_state);
 
     let bind_address = std::env::var("RSDLP_BIND_ADDRESS")
@@ -194,29 +202,77 @@ async fn index_handler() -> Response {
         .unwrap()
 }
 
-async fn qualities_handler(
-    Form(form): Form<QualitiesForm>,
-) -> Result<Json<ytdlp::Qualities>, StatusCode> {
-    tracing::info!("qualities requested for url={}", form.url);
-    let ytdlp = ytdlp::Ytdlp::new(&form.url, None);
-
-    let info = ytdlp.get_info().await
-        .map_err(|e| {
-            tracing::error!("failed to get info for qualities: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    Ok(Json(ytdlp::extract_qualities(&info)))
+pub fn blacklisted_provider_notice(domain: &str) -> String {
+    format!(
+        "This media provider ('{domain}') is currently disabled because processing its streams is a heavy operation that requires intensive CPU and server resources."
+    )
 }
 
-async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, StatusCode> {
-    let res = parse_quality("res", form.res)?;
-    let abr = parse_quality("abr", form.abr)?;
+async fn qualities_handler(
+    State(state): State<admin::AppState>,
+    Form(form): Form<QualitiesForm>,
+) -> Response {
+    tracing::info!("qualities requested for url={}", form.url);
+    if let Ok(Some(domain)) = state.db.check_url_blacklisted(&form.url) {
+        let msg = blacklisted_provider_notice(&domain);
+        tracing::warn!("blocked blacklisted provider url: {} ({domain})", form.url);
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": msg,
+                "blacklisted": true,
+                "domain": domain
+            })),
+        )
+            .into_response();
+    }
+
+    let ytdlp = ytdlp::Ytdlp::new(&form.url, None);
+
+    let info = match ytdlp.get_info().await {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid media URL" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("failed to get info for qualities: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Failed to get media info" })),
+            )
+                .into_response();
+        }
+    };
+
+    Json(ytdlp::extract_qualities(&info)).into_response()
+}
+
+async fn download_handler(
+    State(state): State<admin::AppState>,
+    Form(form): Form<DownloadForm>,
+) -> Response {
+    if let Ok(Some(domain)) = state.db.check_url_blacklisted(&form.url) {
+        let msg = blacklisted_provider_notice(&domain);
+        tracing::warn!("blocked blacklisted provider download: {} ({domain})", form.url);
+        return (StatusCode::FORBIDDEN, msg).into_response();
+    }
+
+    let res = match parse_quality("res", form.res) {
+        Ok(v) => v,
+        Err(status) => return (status, "Invalid res").into_response(),
+    };
+    let abr = match parse_quality("abr", form.abr) {
+        Ok(v) => v,
+        Err(status) => return (status, "Invalid abr").into_response(),
+    };
 
     if res.is_none() && abr.is_none() {
         tracing::warn!("missing quality: at least one of res or abr must be specified");
-        return Err(StatusCode::BAD_REQUEST);
+        return (StatusCode::BAD_REQUEST, "Missing quality").into_response();
     }
 
     tracing::info!("starting download for url={}, res={:?}, abr={:?}", form.url, res, abr);
@@ -225,31 +281,34 @@ async fn download_handler(Form(form): Form<DownloadForm>) -> Result<Response, St
     let mut ytdlp = ytdlp::Ytdlp::new(&form.url, Some(ytdlp::build_sort(res, abr)));
 
     {
-        let info = ytdlp.get_info().await
-            .map_err(|e| {
+        let info = match ytdlp.get_info().await {
+            Ok(Some(info)) => info,
+            Ok(None) => return StatusCode::BAD_REQUEST.into_response(),
+            Err(e) => {
                 tracing::error!("failed to get info for download: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .ok_or(StatusCode::BAD_REQUEST)?;
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
         let filename = ytdlp::extract_filename(&info);
         resp = resp.header("Content-Disposition", format!("attachment; filename=\"{filename}\""));
     }
 
-    ytdlp.start_download()
-        .map_err(|e| {
-            tracing::error!("failed to start download: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    if let Err(e) = ytdlp.start_download() {
+        tracing::error!("failed to start download: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
 
     let stream = tokio_util::io::ReaderStream::new(ytdlp);
     let body = Body::from_stream(stream);
 
-    resp.body(body)
-        .map_err(|e| {
+    match resp.body(body) {
+        Ok(r) => r,
+        Err(e) => {
             tracing::error!("failed to stream response body: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[cfg(test)]

@@ -283,3 +283,57 @@ pub async fn admin_tg_disconnect_handler(
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+#[derive(Deserialize)]
+pub struct BlacklistReq {
+    pub domain: String,
+}
+
+pub async fn admin_blacklist_get_handler(
+    _auth: AdminAuth,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let list = state.db.get_blacklist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "blacklist": list })))
+}
+
+pub async fn admin_blacklist_add_handler(
+    _auth: AdminAuth,
+    State(state): State<AppState>,
+    Json(payload): Json<BlacklistReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let domain = payload.domain.trim();
+    if domain.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Domain cannot be empty" })),
+        ));
+    }
+    state.db.add_blacklist(domain).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+pub async fn admin_blacklist_remove_handler(
+    _auth: AdminAuth,
+    State(state): State<AppState>,
+    Json(payload): Json<BlacklistReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let domain = payload.domain.trim();
+    state.db.remove_blacklist(domain).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
