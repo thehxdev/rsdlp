@@ -21,3 +21,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 grammers-client = "0.8"
 grammers-session = "0.8"
 grammers-mtsender = "0.8"
+sqlite = "0.37"
+bcrypt = "0.17"

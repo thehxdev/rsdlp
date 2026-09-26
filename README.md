@@ -35,27 +35,41 @@ Environment variables can be stored in a `.env` file (copy from `.env.example`).
 
 **Priority**: The environment variable (`RSDLP_LOG` / `RUST_LOG`) takes precedence over the command-line flag if both are specified. Defaults to `info`.
 
-## Telegram User Bot
+## Web Admin Panel & Telegram Authentication
 
-`rsdlp` can optionally run as a Telegram MTProto bot (supporting both standard bot tokens and user account logins, with MTProto allowing file uploads up to 2GB).
+`rsdlp` includes a password-authenticated Web Admin Panel at `/admin`.
+
+- **Authentication**: Default password is `admin`. Password can be changed from the panel and is stored as a bcrypt hash in SQLite (`rsdlp.db`).
+- **Telegram Bot Integration**: Configure API ID, API Hash, and Bot Token directly through the browser. Bot token login operates via MTProto (`client.bot_sign_in`) without requiring phone numbers, SMS codes, or 2FA credentials.
+- **Modular Backend**: If Telegram is unconfigured or stopped, the web server (`/`, `/qualities`, `/download`, `/admin`) operates in standalone mode without errors.
+- **Storage & Disk Safety**: Media files staged for Telegram uploads reside in `${RSDLP_DATA_DIR}/downloads`. The panel displays partition disk metrics (used/free/total) and includes a manual trigger to prune stale temp files. Unhandled crashes are automatically cleaned up on next boot.
+
+## Docker Deployment
+
+`rsdlp` is fully unattended and automatic in Docker:
+
+```sh
+docker run -d \
+  -p 3000:3000 \
+  -v rsdlp_data:/data \
+  rsdlp
+```
+
+- Both `rsdlp.db`, `rsdlp.session`, and temporary download staging reside concisely in `/data`.
+- No environment variables are mandatory at startup; all configuration and Telegram bot setup are handled via `http://<host>:3000/admin`.
+
+## Telegram Bot
+
+`rsdlp` can optionally run as a Telegram MTProto bot (with MTProto allowing file uploads up to 2GB).
 
 ### Setup
 
-1. Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-2. Set environment variables (or put them in `.env`):
-   ```sh
-   export RSDLP_TG_API_ID="1234567"
-   export RSDLP_TG_API_HASH="0123456789abcdef0123456789abcdef"
-   export RSDLP_TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" # bot token from @BotFather
-   export RSDLP_TG_SESSION_FILE="rsdlp.session" # optional, defaults to rsdlp.session
-   ```
-3. Run `rsdlp`:
-   ```sh
-   cargo run
-   ```
-   If `RSDLP_TG_BOT_TOKEN` is set, authentication happens automatically on startup without any interactive phone/code prompts.
+1. Open `http://<host>:3000/admin` in your browser.
+2. Log in with password `admin` (change it in the panel).
+3. Under **Telegram Bot**, enter your `api_id` and `api_hash` (from [my.telegram.org](https://my.telegram.org)) and `bot_token` (from [@BotFather](https://t.me/BotFather)).
+4. Click **Save & Start Bot**. The bot signs in and starts immediately.
 
-   *(Optional: If not using a bot token and logging in with a phone number instead, omit `RSDLP_TG_BOT_TOKEN` and run `cargo run -- --tg-login` once to authenticate via phone code and 2FA password).*
+*(Environment variables `RSDLP_TG_API_ID`, `RSDLP_TG_API_HASH`, and `RSDLP_TG_BOT_TOKEN` remain supported as optional fallbacks).*
 
 ### Usage
 
@@ -72,9 +86,9 @@ Telegram MTProto uploads (`upload.saveBigFilePart`) require knowing the exact fi
 
 
 ## Current Limitations
-
+ 
 - No URL validation. A bad URL makes yt-dlp fail and panics the whole server.
-- No auth and no rate limiting.
+- No rate limiting.
 
 ## License
 

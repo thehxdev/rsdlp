@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, BufRead as _, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use grammers_client::client::{Client, SignInError, UpdatesConfiguration};
+use grammers_client::client::{Client, UpdatesConfiguration};
 use grammers_client::types::update;
 use grammers_client::types::{InputMessage, Update};
 use grammers_client::{button, reply_markup};
@@ -233,11 +232,12 @@ impl Drop for TempFileGuard {
 pub struct TelegramConfig {
     pub api_id: i32,
     pub api_hash: String,
-    pub bot_token: Option<String>,
+    pub bot_token: String,
     pub session_file: String,
 }
 
 impl TelegramConfig {
+    #[allow(dead_code)]
     pub fn from_env() -> Option<Self> {
         let get_var = |key: &str| {
             env::var(format!("RSDLP_{key}"))
@@ -247,7 +247,10 @@ impl TelegramConfig {
 
         let api_id = get_var("TG_API_ID")?.parse().ok()?;
         let api_hash = get_var("TG_API_HASH")?;
-        let bot_token = get_var("TG_BOT_TOKEN").filter(|s| !s.trim().is_empty());
+        let bot_token = get_var("TG_BOT_TOKEN")?.trim().to_string();
+        if bot_token.is_empty() {
+            return None;
+        }
         let session_file =
             get_var("TG_SESSION_FILE").unwrap_or_else(|| "rsdlp.session".to_string());
 
@@ -260,54 +263,6 @@ impl TelegramConfig {
     }
 }
 
-fn prompt(message: &str) -> io::Result<String> {
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(message.as_bytes())?;
-    stdout.flush()?;
-
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim().to_string())
-}
-
-pub async fn authorize_client(
-    client: &Client,
-    api_hash: &str,
-    bot_token: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if client.is_authorized().await? {
-        return Ok(());
-    }
-
-    if let Some(token) = bot_token {
-        tracing::info!("Telegram session not authorized. Signing in with bot token...");
-        client.bot_sign_in(token, api_hash).await?;
-        tracing::info!("Telegram bot token login successful");
-        return Ok(());
-    }
-
-    println!("[telegram] Session not authorized. Starting interactive login...");
-    let phone = prompt("Enter phone number with country code (e.g. +1234567890): ")?;
-    let token = client.request_login_code(&phone, api_hash).await?;
-    let code = prompt("Enter the login code you received: ")?;
-
-    match client.sign_in(&token, &code).await {
-        Ok(_) => {
-            println!("[telegram] Login successful!");
-            Ok(())
-        }
-        Err(SignInError::PasswordRequired(password_token)) => {
-            let hint = password_token.hint().unwrap_or("none");
-            let prompt_msg = format!("2FA Password required (hint: {hint}): ");
-            let password = prompt(&prompt_msg)?;
-            client.check_password(password_token, &password).await?;
-            println!("[telegram] 2FA authentication successful!");
-            Ok(())
-        }
-        Err(e) => Err(Box::new(e)),
-    }
-}
-
 pub struct PendingChoice {
     pub url: String,
     pub title: String,
@@ -316,13 +271,24 @@ pub struct PendingChoice {
 pub struct BotState {
     pub pending: Mutex<HashMap<PeerId, PendingChoice>>,
     pub active_operations: Mutex<HashMap<PeerId, tokio::task::AbortHandle>>,
+    pub staging_dir: PathBuf,
 }
 
 impl BotState {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
             active_operations: Mutex::new(HashMap::new()),
+            staging_dir: std::env::temp_dir(),
+        }
+    }
+
+    pub fn new_with_staging(staging_dir: PathBuf) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            active_operations: Mutex::new(HashMap::new()),
+            staging_dir,
         }
     }
 
@@ -339,25 +305,227 @@ impl BotState {
     }
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TelegramStatus {
+    pub configured: bool,
+    pub running: bool,
+    pub bot_username: Option<String>,
+    pub bot_name: Option<String>,
+    pub session_file: String,
+    pub api_id: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BotInfo {
+    pub bot_username: Option<String>,
+    pub bot_name: Option<String>,
+    pub api_id: i32,
+}
+
+#[derive(Clone)]
+pub struct TelegramManager {
+    db: crate::db::Database,
+    session_file: String,
+    staging_dir: PathBuf,
+    bot_task: Arc<tokio::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+    bot_info: Arc<tokio::sync::RwLock<Option<BotInfo>>>,
+}
+
+impl TelegramManager {
+    pub fn new(db: crate::db::Database, session_file: String, staging_dir: PathBuf) -> Self {
+        Self {
+            db,
+            session_file,
+            staging_dir,
+            bot_task: Arc::new(tokio::sync::Mutex::new(None)),
+            bot_info: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+
+    pub async fn get_config(&self) -> Option<TelegramConfig> {
+        let api_id: Option<i32> = self
+            .db
+            .get_config("tg_api_id")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                std::env::var("RSDLP_TG_API_ID")
+                    .or_else(|_| std::env::var("TG_API_ID"))
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            });
+        let api_hash = self
+            .db
+            .get_config("tg_api_hash")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                std::env::var("RSDLP_TG_API_HASH")
+                    .or_else(|_| std::env::var("TG_API_HASH"))
+                    .ok()
+            });
+        let bot_token = self
+            .db
+            .get_config("tg_bot_token")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                std::env::var("RSDLP_TG_BOT_TOKEN")
+                    .or_else(|_| std::env::var("TG_BOT_TOKEN"))
+                    .ok()
+            })
+            .filter(|s| !s.trim().is_empty());
+
+        let api_id = api_id?;
+        let api_hash = api_hash?;
+        let bot_token = bot_token?;
+
+        Some(TelegramConfig {
+            api_id,
+            api_hash,
+            bot_token,
+            session_file: self.session_file.clone(),
+        })
+    }
+
+    pub async fn get_status(&self) -> TelegramStatus {
+        let info = self.bot_info.read().await.clone();
+        if let Some(info) = info {
+            TelegramStatus {
+                configured: true,
+                running: true,
+                bot_username: info.bot_username,
+                bot_name: info.bot_name,
+                session_file: self.session_file.clone(),
+                api_id: Some(info.api_id),
+            }
+        } else if let Some(cfg) = self.get_config().await {
+            TelegramStatus {
+                configured: true,
+                running: false,
+                bot_username: None,
+                bot_name: None,
+                session_file: self.session_file.clone(),
+                api_id: Some(cfg.api_id),
+            }
+        } else {
+            TelegramStatus {
+                configured: false,
+                running: false,
+                bot_username: None,
+                bot_name: None,
+                session_file: self.session_file.clone(),
+                api_id: None,
+            }
+        }
+    }
+
+    pub async fn start_bot(&self) -> Result<(), String> {
+        let cfg = self
+            .get_config()
+            .await
+            .ok_or("Telegram bot token, api_id, or api_hash missing")?;
+        let mut task_guard = self.bot_task.lock().await;
+        if let Some(old) = task_guard.take() {
+            old.abort();
+        }
+        *self.bot_info.write().await = None;
+
+        let staging = self.staging_dir.clone();
+        let info_clone = Arc::clone(&self.bot_info);
+        let handle = tokio::spawn(async move {
+            if let Err(e) = run_bot_service(cfg, staging, info_clone).await {
+                tracing::error!("[telegram] bot error: {e}");
+            }
+        });
+
+        *task_guard = Some(handle.abort_handle());
+        tracing::info!("[telegram] Telegram bot task started");
+        Ok(())
+    }
+
+    pub async fn stop_bot(&self) {
+        let mut task_guard = self.bot_task.lock().await;
+        if let Some(handle) = task_guard.take() {
+            handle.abort();
+            *self.bot_info.write().await = None;
+            tracing::info!("[telegram] Telegram bot task stopped");
+        }
+    }
+
+    pub async fn disconnect(&self) -> Result<(), String> {
+        self.stop_bot().await;
+        if std::path::Path::new(&self.session_file).exists() {
+            let _ = std::fs::remove_file(&self.session_file);
+        }
+        let _ = self.db.delete_config("tg_bot_token");
+        Ok(())
+    }
+
+    pub async fn init_from_db(&self) {
+        if self.get_config().await.is_some() {
+            tracing::info!("[telegram] Telegram bot configured. Starting bot runner...");
+            let _ = self.start_bot().await;
+        } else {
+            tracing::info!("[telegram] Telegram bot not configured. Running web-only mode.");
+        }
+    }
+}
+
+struct BotInfoGuard(Arc<tokio::sync::RwLock<Option<BotInfo>>>);
+impl Drop for BotInfoGuard {
+    fn drop(&mut self) {
+        if let Ok(mut lock) = self.0.try_write() {
+            *lock = None;
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub async fn run_bot(
     config: TelegramConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bot_info = Arc::new(tokio::sync::RwLock::new(None));
+    run_bot_service(config, std::env::temp_dir(), bot_info).await
+}
+
+pub async fn run_bot_service(
+    config: TelegramConfig,
+    staging_dir: PathBuf,
+    bot_info: Arc<tokio::sync::RwLock<Option<BotInfo>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _guard = BotInfoGuard(Arc::clone(&bot_info));
+
     let session = Arc::new(SqliteSession::open(&config.session_file)?);
     let pool = SenderPool::new(Arc::clone(&session), config.api_id);
     let client = Client::new(&pool);
     let _pool_task = tokio::spawn(pool.runner.run());
 
-    authorize_client(&client, &config.api_hash, config.bot_token.as_deref()).await?;
+    if !client.is_authorized().await? {
+        tracing::info!("[telegram] Authorizing bot with token...");
+        client.bot_sign_in(&config.bot_token, &config.api_hash).await?;
+        tracing::info!("[telegram] Bot token login successful");
+    }
 
     let me = client.get_me().await?;
     let me_peer_id = PeerId::user(me.raw.id());
+    let bot_username = me.username().map(String::from);
+    let bot_name = me.first_name().map(String::from);
     tracing::info!(
-        "[telegram] userbot running as {} (id: {})",
-        me.first_name().unwrap_or("User"),
+        "[telegram] bot running as @{} ({}) (id: {})",
+        bot_username.as_deref().unwrap_or("unknown"),
+        bot_name.as_deref().unwrap_or("Bot"),
         me.raw.id()
     );
 
-    let state = Arc::new(BotState::new());
+    *bot_info.write().await = Some(BotInfo {
+        bot_username,
+        bot_name,
+        api_id: config.api_id,
+    });
+
+    let state = Arc::new(BotState::new_with_staging(staging_dir));
     let mut update_stream = client.stream_updates(
         pool.updates,
         UpdatesConfiguration {
@@ -451,6 +619,7 @@ async fn handle_callback_query(
             let state_clone = Arc::clone(&state);
             let client_clone = client.clone();
             let peer_id_copy = peer_id;
+            let staging_dir = state.staging_dir.clone();
 
             let join_handle = tokio::spawn(async move {
                 let res = execute_download_and_upload(
@@ -461,6 +630,7 @@ async fn handle_callback_query(
                     abr,
                     &desc,
                     msg_id,
+                    &staging_dir,
                 )
                 .await;
                 state_clone
@@ -574,6 +744,7 @@ async fn handle_message(
             let state_clone = Arc::clone(&state);
             let client_clone = client.clone();
             let peer_id_copy = peer_id;
+            let staging_dir = state.staging_dir.clone();
 
             let join_handle = tokio::spawn(async move {
                 let res = execute_download_and_upload(
@@ -584,6 +755,7 @@ async fn handle_message(
                     abr,
                     &desc,
                     None,
+                    &staging_dir,
                 )
                 .await;
                 state_clone
@@ -616,6 +788,7 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     abr: Option<u64>,
     desc: &str,
     status_msg_id: Option<i32>,
+    staging_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let peer_ref = peer.into();
     let sort_str = ytdlp::build_sort(res, abr);
@@ -629,7 +802,7 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     );
 
     let downloading_msg = InputMessage::new()
-        .text(format!("⏳ Downloading {} ({desc})...", pending.title))
+        .text(format!("⏳ [1/2] Downloading {} ({desc}) to server disk...", pending.title))
         .reply_markup(&cancel_markup());
 
     let status_msg_id = match status_msg_id {
@@ -650,7 +823,7 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
 
     let id = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let safe_filename = filename.replace(['/', '\\', '\0'], "_");
-    let temp_path = PathBuf::from(std::env::temp_dir()).join(format!(
+    let temp_path = staging_dir.join(format!(
         "rsdlp_{}_{}_{}",
         std::process::id(),
         id,
@@ -668,18 +841,23 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     .await;
 
     if let Err(e) = download_res {
+        let err_text = if e.kind() == std::io::ErrorKind::StorageFull {
+            "Download failed: Server storage full. Contact administrator.".to_string()
+        } else {
+            format!("Download failed: {e}")
+        };
         let _ = client
             .edit_message(
                 peer_ref,
                 status_msg_id,
-                InputMessage::new().text(format!("Download failed: {e}")),
+                InputMessage::new().text(err_text),
             )
             .await;
         return Ok(());
     }
 
     let uploading_msg = InputMessage::new()
-        .text(format!("📤 Uploading {} to Telegram...", pending.title))
+        .text(format!("📤 [2/2] Uploading {} to Telegram...", pending.title))
         .reply_markup(&cancel_markup());
     let _ = client
         .edit_message(peer_ref, status_msg_id, uploading_msg)
@@ -906,7 +1084,7 @@ mod tests {
         let config = TelegramConfig::from_env().expect("config should parse");
         assert_eq!(config.api_id, 12345);
         assert_eq!(config.api_hash, "abcdef");
-        assert_eq!(config.bot_token.as_deref(), Some("123:ABC"));
+        assert_eq!(config.bot_token, "123:ABC");
 
         // Clean up
         unsafe {

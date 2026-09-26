@@ -10,6 +10,9 @@ use serde::Deserialize;
 
 mod ytdlp;
 mod telegram;
+mod db;
+mod storage;
+mod admin;
 
 const INDEX_HTML: &[u8] = include_bytes!("../index.html");
 
@@ -127,31 +130,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging(&log_filter);
     tracing::info!("rsdlp starting (log_filter={})", log_filter);
 
-    if let Some(tg_config) = telegram::TelegramConfig::from_env() {
-        if args.iter().any(|arg| arg == "--tg-login") {
-            tracing::info!("Running Telegram interactive login...");
-            let session = std::sync::Arc::new(grammers_session::storages::SqliteSession::open(&tg_config.session_file)?);
-            let pool = grammers_mtsender::SenderPool::new(std::sync::Arc::clone(&session), tg_config.api_id);
-            let client = grammers_client::Client::new(&pool);
-            tokio::spawn(pool.runner.run());
-            telegram::authorize_client(&client, &tg_config.api_hash, tg_config.bot_token.as_deref()).await?;
-            tracing::info!("Login complete. Session saved to {}", tg_config.session_file);
-            return Ok(());
-        }
+    let data_dir = std::env::var("RSDLP_DATA_DIR")
+        .unwrap_or_else(|_| ".".to_string());
+    let db_path = format!("{}/rsdlp.db", data_dir);
+    let session_path = std::env::var("RSDLP_TG_SESSION_FILE")
+        .unwrap_or_else(|_| format!("{}/rsdlp.session", data_dir));
+    let staging_dir = std::path::PathBuf::from(format!("{}/downloads", data_dir));
 
-        tokio::spawn(async move {
-            if let Err(e) = telegram::run_bot(tg_config).await {
-                tracing::error!("[telegram] bot error: {e}");
-            }
-        });
-    } else {
-        tracing::info!("Telegram credentials not set (RSDLP_TG_API_ID / RSDLP_TG_API_HASH). Running web-only mode.");
+    let db = db::Database::open(&db_path)?;
+    let storage_manager = storage::StorageManager::new(staging_dir.clone());
+    let pruned = storage_manager.prune_stale_files();
+    if pruned > 0 {
+        tracing::info!("pruned {pruned} stale download staging file(s) on startup");
     }
+
+    let telegram_manager = telegram::TelegramManager::new(db.clone(), session_path, staging_dir);
+
+    let tm = telegram_manager.clone();
+    tokio::spawn(async move {
+        tm.init_from_db().await;
+    });
+
+    let app_state = admin::AppState {
+        db,
+        storage: storage_manager,
+        telegram: telegram_manager,
+    };
 
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/download", post(download_handler))
-        .route("/qualities", post(qualities_handler));
+        .route("/qualities", post(qualities_handler))
+        .route("/admin", get(admin::admin_html_handler))
+        .route("/api/admin/login", post(admin::admin_login_handler))
+        .route("/api/admin/logout", post(admin::admin_logout_handler))
+        .route("/api/admin/status", get(admin::admin_status_handler))
+        .route("/api/admin/change-password", post(admin::admin_change_password_handler))
+        .route("/api/admin/prune-temp", post(admin::admin_prune_temp_handler))
+        .route(
+            "/api/admin/telegram/config",
+            get(admin::admin_tg_config_get_handler).post(admin::admin_tg_config_set_handler),
+        )
+        .route("/api/admin/telegram/start", post(admin::admin_tg_start_handler))
+        .route("/api/admin/telegram/stop", post(admin::admin_tg_stop_handler))
+        .route("/api/admin/telegram/disconnect", post(admin::admin_tg_disconnect_handler))
+        .with_state(app_state);
 
     let bind_address = std::env::var("RSDLP_BIND_ADDRESS")
         .or_else(|_| std::env::var("BIND_ADDRESS"))

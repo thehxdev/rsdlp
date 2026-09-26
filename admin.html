@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rsdlp – Admin Panel</title>
+<style>
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f5f5f7;
+    font: 16px/1.5 system-ui, sans-serif;
+    color: #222;
+    padding: 1.5rem 0;
+  }
+  main {
+    width: min(640px, 92vw);
+    padding: 2rem;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .12);
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid #eee;
+    padding-bottom: .75rem;
+  }
+  h1 { margin: 0; font-size: 1.4rem; }
+  h2 { margin: 1.25rem 0 .5rem; font-size: 1.1rem; color: #111; }
+  p  { margin: 0 0 1rem; color: #666; font-size: .95rem; }
+  .card {
+    background: #fafafa;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  form { display: flex; flex-direction: column; gap: .75rem; }
+  .field { display: flex; flex-direction: column; gap: .3rem; }
+  label { font-size: .85rem; color: #555; font-weight: 500; }
+  input[type="text"], input[type="password"], input[type="number"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: .6rem .75rem;
+    border: 1px solid #bbb;
+    border-radius: 6px;
+    font: inherit;
+    background: #fff;
+  }
+  .row { display: flex; gap: .75rem; }
+  .row .field { flex: 1; }
+  button {
+    padding: .6rem 1.1rem;
+    border: 0;
+    border-radius: 6px;
+    background: #2563eb;
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  button.secondary { background: #6b7280; }
+  button.danger { background: #dc2626; }
+  button:disabled { opacity: .6; cursor: default; }
+  .badge {
+    display: inline-block;
+    padding: .2rem .6rem;
+    border-radius: 999px;
+    font-size: .8rem;
+    font-weight: 600;
+  }
+  .badge.green { background: #dcfce7; color: #166534; }
+  .badge.gray { background: #f3f4f6; color: #4b5563; }
+  .progress-bg {
+    width: 100%;
+    height: 12px;
+    background: #e5e7eb;
+    border-radius: 6px;
+    overflow: hidden;
+    margin: .5rem 0;
+  }
+  .progress-bar {
+    height: 100%;
+    background: #2563eb;
+    width: 0%;
+    transition: width .3s ease;
+  }
+  .msg {
+    margin: .5rem 0 0;
+    font-size: .9rem;
+    font-weight: 500;
+  }
+  .msg.ok { color: #166534; }
+  .msg.err { color: #dc2626; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <!-- Login Section -->
+  <section id="login-sec">
+    <h1>rsdlp Admin Login</h1>
+    <p>Authentication required to configure rsdlp and Telegram.</p>
+    <form id="login-form">
+      <div class="field">
+        <label for="login-pass">Admin Password (default: admin)</label>
+        <input type="password" id="login-pass" required autofocus>
+      </div>
+      <button type="submit">Log in</button>
+      <div id="login-msg" class="msg err" hidden></div>
+    </form>
+  </section>
+
+  <!-- Dashboard Section -->
+  <section id="dash-sec" hidden>
+    <header>
+      <h1>rsdlp Admin Panel</h1>
+      <div>
+        <a href="/" style="margin-right: 1rem; color: #2563eb; text-decoration: none; font-size: .9rem;">Home</a>
+        <button type="button" id="logout-btn" class="secondary" style="padding: .4rem .8rem; font-size: .85rem;">Logout</button>
+      </div>
+    </header>
+
+    <!-- Storage Card -->
+    <div class="card">
+      <h2>Storage & Staging Health</h2>
+      <p id="storage-dir">Staging Path: Loading...</p>
+      <div class="progress-bg">
+        <div id="disk-bar" class="progress-bar"></div>
+      </div>
+      <p id="disk-label" style="font-size: .85rem; color: #555;">Querying disk space...</p>
+      <button type="button" id="prune-btn" class="secondary" style="font-size: .85rem;">Prune Stale Temp Files</button>
+      <span id="prune-msg" class="msg ok" style="margin-left: .5rem;" hidden></span>
+    </div>
+
+    <!-- Admin Password Card -->
+    <div class="card">
+      <h2>Change Admin Password</h2>
+      <form id="pw-form">
+        <div class="row">
+          <div class="field">
+            <label for="cur-pass">Current Password</label>
+            <input type="password" id="cur-pass" required>
+          </div>
+          <div class="field">
+            <label for="new-pass">New Password</label>
+            <input type="password" id="new-pass" required>
+          </div>
+        </div>
+        <button type="submit" style="align-self: flex-start;">Update Password</button>
+        <div id="pw-msg" class="msg" hidden></div>
+      </form>
+    </div>
+
+    <!-- Telegram Card -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2>Telegram Bot</h2>
+        <span id="tg-status-badge" class="badge gray">Disconnected</span>
+      </div>
+      <p id="tg-desc">Configure Telegram bot token backend.</p>
+
+      <form id="tg-config-form">
+        <div class="row">
+          <div class="field">
+            <label for="tg-api-id">API ID</label>
+            <input type="number" id="tg-api-id" placeholder="1234567" required>
+          </div>
+          <div class="field">
+            <label for="tg-api-hash">API Hash</label>
+            <input type="text" id="tg-api-hash" placeholder="0123456789abcdef..." required>
+          </div>
+        </div>
+        <div class="field">
+          <label for="tg-bot-token">Bot Token (from @BotFather)</label>
+          <input type="text" id="tg-bot-token" placeholder="123456:ABC-DEF..." required>
+        </div>
+        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+          <button type="submit" class="primary">Save & Start Bot</button>
+          <button type="button" id="tg-stop-btn" class="secondary" hidden>Stop Bot</button>
+          <button type="button" id="tg-logout-btn" class="danger" hidden>Disconnect</button>
+        </div>
+        <div id="tg-cfg-msg" class="msg ok" hidden></div>
+      </form>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  async function checkAuthAndLoad() {
+    try {
+      const res = await fetch('/api/admin/status');
+      if (res.status === 401) {
+        $('login-sec').hidden = false;
+        $('dash-sec').hidden = true;
+        return;
+      }
+      const data = await res.json();
+      $('login-sec').hidden = true;
+      $('dash-sec').hidden = false;
+      renderDashboard(data);
+    } catch (e) {
+      $('login-sec').hidden = false;
+      $('dash-sec').hidden = true;
+    }
+  }
+
+  function renderDashboard(data) {
+    // Render Storage
+    if (data.storage) {
+      $('storage-dir').textContent = 'Staging Path: ' + data.storage.staging_path;
+      const pct = data.storage.total_bytes > 0 ? ((data.storage.used_bytes / data.storage.total_bytes) * 100).toFixed(1) : 0;
+      $('disk-bar').style.width = pct + '%';
+      $('disk-label').textContent = `${formatBytes(data.storage.used_bytes)} used of ${formatBytes(data.storage.total_bytes)} (${formatBytes(data.storage.free_bytes)} free)`;
+    }
+
+    // Render Telegram
+    if (data.telegram) {
+      const tg = data.telegram;
+      if (tg.running) {
+        $('tg-status-badge').textContent = 'Running' + (tg.bot_username ? ': @' + tg.bot_username : '');
+        $('tg-status-badge').className = 'badge green';
+        $('tg-desc').textContent = `Bot active (@${tg.bot_username || 'N/A'}${tg.bot_name ? ', ' + tg.bot_name : ''}). Session: ${tg.session_file}`;
+        $('tg-stop-btn').hidden = false;
+        $('tg-logout-btn').hidden = false;
+      } else if (tg.configured) {
+        $('tg-status-badge').textContent = 'Stopped';
+        $('tg-status-badge').className = 'badge gray';
+        $('tg-desc').textContent = 'Bot credentials configured, but bot is currently stopped.';
+        $('tg-stop-btn').hidden = true;
+        $('tg-logout-btn').hidden = false;
+      } else {
+        $('tg-status-badge').textContent = 'Not Configured';
+        $('tg-status-badge').className = 'badge gray';
+        $('tg-desc').textContent = 'Enter API ID, API Hash, and Bot Token to activate the Telegram bot.';
+        $('tg-stop-btn').hidden = true;
+        $('tg-logout-btn').hidden = true;
+      }
+    }
+  }
+
+  // Login handler
+  $('login-form').onsubmit = async e => {
+    e.preventDefault();
+    const password = $('login-pass').value;
+    const msg = $('login-msg');
+    msg.hidden = true;
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        msg.textContent = err.error || 'Login failed';
+        msg.hidden = false;
+        return;
+      }
+      $('login-pass').value = '';
+      checkAuthAndLoad();
+    } catch (err) {
+      msg.textContent = 'Network error';
+      msg.hidden = false;
+    }
+  };
+
+  // Logout handler
+  $('logout-btn').onclick = async () => {
+    await fetch('/api/admin/logout', { method: 'POST' });
+    checkAuthAndLoad();
+  };
+
+  // Change password handler
+  $('pw-form').onsubmit = async e => {
+    e.preventDefault();
+    const old_password = $('cur-pass').value;
+    const new_password = $('new-pass').value;
+    const msg = $('pw-msg');
+    msg.hidden = true;
+    try {
+      const res = await fetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_password, new_password })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        msg.textContent = data.error || 'Failed to update password';
+        msg.className = 'msg err';
+        msg.hidden = false;
+      } else {
+        msg.textContent = 'Password updated successfully!';
+        msg.className = 'msg ok';
+        msg.hidden = false;
+        $('cur-pass').value = '';
+        $('new-pass').value = '';
+      }
+    } catch (e) {
+      msg.textContent = 'Error connecting to server';
+      msg.className = 'msg err';
+      msg.hidden = false;
+    }
+  };
+
+  // Prune temp files
+  $('prune-btn').onclick = async () => {
+    const res = await fetch('/api/admin/prune-temp', { method: 'POST' });
+    const data = await res.json();
+    const msg = $('prune-msg');
+    msg.textContent = `Pruned ${data.pruned || 0} file(s)`;
+    msg.hidden = false;
+    setTimeout(() => { msg.hidden = true; }, 3000);
+    checkAuthAndLoad();
+  };
+
+  // Load Telegram Config
+  async function loadTelegramConfig() {
+    try {
+      const res = await fetch('/api/admin/telegram/config');
+      if (res.ok) {
+        const cfg = await res.json();
+        if (cfg.api_id) $('tg-api-id').value = cfg.api_id;
+        if (cfg.api_hash) $('tg-api-hash').value = cfg.api_hash;
+        if (cfg.bot_token) $('tg-bot-token').value = cfg.bot_token;
+      }
+    } catch (_) {}
+  }
+
+  // Save Telegram config and start bot
+  $('tg-config-form').onsubmit = async e => {
+    e.preventDefault();
+    const api_id = parseInt($('tg-api-id').value, 10);
+    const api_hash = $('tg-api-hash').value.trim();
+    const bot_token = $('tg-bot-token').value.trim();
+    const msg = $('tg-cfg-msg');
+    msg.hidden = true;
+    try {
+      const res = await fetch('/api/admin/telegram/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_id, api_hash, bot_token })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msg.textContent = 'Configuration saved and bot started!';
+        msg.className = 'msg ok';
+        msg.hidden = false;
+        setTimeout(() => { msg.hidden = true; }, 3000);
+        checkAuthAndLoad();
+      } else {
+        msg.textContent = data.error || 'Failed to save configuration';
+        msg.className = 'msg err';
+        msg.hidden = false;
+      }
+    } catch (_) {
+      msg.textContent = 'Network error saving configuration';
+      msg.className = 'msg err';
+      msg.hidden = false;
+    }
+  };
+
+  // Stop Bot
+  $('tg-stop-btn').onclick = async () => {
+    await fetch('/api/admin/telegram/stop', { method: 'POST' });
+    checkAuthAndLoad();
+  };
+
+  // Telegram Disconnect
+  $('tg-logout-btn').onclick = async () => {
+    if (!confirm('Are you sure you want to disconnect Telegram and clear credentials?')) return;
+    await fetch('/api/admin/telegram/disconnect', { method: 'POST' });
+    $('tg-bot-token').value = '';
+    checkAuthAndLoad();
+  };
+
+  // Init
+  checkAuthAndLoad();
+  loadTelegramConfig();
+</script>
+</body>
+</html>
