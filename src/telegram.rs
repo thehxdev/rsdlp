@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -273,6 +273,8 @@ pub struct BotState {
     pub active_operations: Mutex<HashMap<PeerId, tokio::task::AbortHandle>>,
     pub staging_dir: PathBuf,
     pub db: Option<crate::db::Database>,
+    seen_messages: Mutex<(VecDeque<(PeerId, i32)>, HashSet<(PeerId, i32)>)>,
+    seen_callbacks: Mutex<(VecDeque<i64>, HashSet<i64>)>,
 }
 
 impl BotState {
@@ -283,6 +285,8 @@ impl BotState {
             active_operations: Mutex::new(HashMap::new()),
             staging_dir: std::env::temp_dir(),
             db: None,
+            seen_messages: Mutex::new((VecDeque::new(), HashSet::new())),
+            seen_callbacks: Mutex::new((VecDeque::new(), HashSet::new())),
         }
     }
 
@@ -292,6 +296,8 @@ impl BotState {
             active_operations: Mutex::new(HashMap::new()),
             staging_dir,
             db: None,
+            seen_messages: Mutex::new((VecDeque::new(), HashSet::new())),
+            seen_callbacks: Mutex::new((VecDeque::new(), HashSet::new())),
         }
     }
 
@@ -301,7 +307,43 @@ impl BotState {
             active_operations: Mutex::new(HashMap::new()),
             staging_dir,
             db: Some(db),
+            seen_messages: Mutex::new((VecDeque::new(), HashSet::new())),
+            seen_callbacks: Mutex::new((VecDeque::new(), HashSet::new())),
         }
+    }
+
+    pub async fn mark_message_seen(&self, peer_id: PeerId, msg_id: i32) -> bool {
+        let mut guard = self.seen_messages.lock().await;
+        let key = (peer_id, msg_id);
+        if guard.1.contains(&key) {
+            return false;
+        }
+        if guard.0.len() >= 1000 {
+            if let Some(old) = guard.0.pop_front() {
+                guard.1.remove(&old);
+            }
+        }
+        guard.0.push_back(key);
+        guard.1.insert(key);
+        true
+    }
+
+    pub async fn mark_callback_seen(&self, query_id: i64) -> bool {
+        if query_id == 0 {
+            return true;
+        }
+        let mut guard = self.seen_callbacks.lock().await;
+        if guard.1.contains(&query_id) {
+            return false;
+        }
+        if guard.0.len() >= 1000 {
+            if let Some(old) = guard.0.pop_front() {
+                guard.1.remove(&old);
+            }
+        }
+        guard.0.push_back(query_id);
+        guard.1.insert(query_id);
+        true
     }
 
     pub async fn cancel(&self, peer_id: &PeerId) -> bool {
@@ -503,6 +545,13 @@ pub async fn run_bot(
     run_bot_service(config, std::env::temp_dir(), None, bot_info).await
 }
 
+struct TaskAbortOnDrop(tokio::task::AbortHandle);
+impl Drop for TaskAbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn run_bot_service(
     config: TelegramConfig,
     staging_dir: PathBuf,
@@ -514,7 +563,8 @@ pub async fn run_bot_service(
     let session = Arc::new(SqliteSession::open(&config.session_file)?);
     let pool = SenderPool::new(Arc::clone(&session), config.api_id);
     let client = Client::new(&pool);
-    let _pool_task = tokio::spawn(pool.runner.run());
+    let pool_task = tokio::spawn(pool.runner.run());
+    let _pool_task_guard = TaskAbortOnDrop(pool_task.abort_handle());
 
     if !client.is_authorized().await? {
         tracing::info!("[telegram] Authorizing bot with token...");
@@ -545,19 +595,25 @@ pub async fn run_bot_service(
     };
     let mut update_stream = client.stream_updates(
         pool.updates,
-        UpdatesConfiguration {
-            catch_up: true,
-            ..Default::default()
-        },
+        UpdatesConfiguration::default(),
     );
 
     while let Ok(update) = update_stream.next().await {
+        update_stream.sync_update_state();
         match update {
             Update::NewMessage(message) => {
                 let peer_id = message.peer_id();
                 let is_saved_messages = peer_id == me_peer_id;
                 // Process if incoming message, or user typing to self in Saved Messages
                 if !message.outgoing() || is_saved_messages {
+                    if !state.mark_message_seen(peer_id, message.id()).await {
+                        tracing::debug!(
+                            "[telegram] ignoring duplicate message id {} for peer {:?}",
+                            message.id(),
+                            peer_id
+                        );
+                        continue;
+                    }
                     let client_clone = client.clone();
                     let state_clone = Arc::clone(&state);
                     tokio::spawn(async move {
@@ -568,6 +624,19 @@ pub async fn run_bot_service(
                 }
             }
             Update::CallbackQuery(query) => {
+                let qid = match &query.raw {
+                    grammers_client::grammers_tl_types::enums::Update::BotCallbackQuery(u) => {
+                        u.query_id
+                    }
+                    grammers_client::grammers_tl_types::enums::Update::InlineBotCallbackQuery(
+                        u,
+                    ) => u.query_id,
+                    _ => 0,
+                };
+                if !state.mark_callback_seen(qid).await {
+                    tracing::debug!("[telegram] ignoring duplicate callback query {qid}");
+                    continue;
+                }
                 let client_clone = client.clone();
                 let state_clone = Arc::clone(&state);
                 tokio::spawn(async move {
@@ -1049,6 +1118,30 @@ mod tests {
             .insert(peer_id, handle.abort_handle());
         assert!(state.cancel(&peer_id).await);
         assert!(!state.cancel(&peer_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_message_and_callback_deduplication() {
+        let state = BotState::new();
+        let peer_id = PeerId::user(12345);
+
+        // First time message 42 is seen -> returns true
+        assert!(state.mark_message_seen(peer_id, 42).await);
+
+        // Duplicate delivery of message 42 -> returns false
+        assert!(!state.mark_message_seen(peer_id, 42).await);
+
+        // Different message ID 43 -> returns true
+        assert!(state.mark_message_seen(peer_id, 43).await);
+
+        // First time callback query 999 -> returns true
+        assert!(state.mark_callback_seen(999).await);
+
+        // Duplicate callback query 999 -> returns false
+        assert!(!state.mark_callback_seen(999).await);
+
+        // Different callback query 1000 -> returns true
+        assert!(state.mark_callback_seen(1000).await);
     }
 
     #[tokio::test]
