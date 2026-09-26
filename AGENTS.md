@@ -6,6 +6,11 @@ Guidance for AI agents (and humans) working on this repo.
 
 `rsdlp` is a small prototype HTTP API around [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), written in Rust. It is intentionally minimal — the README's "I will regret using Rust for this" energy is accurate. Prefer the smallest change that works over abstractions, config systems, or new dependencies.
 
+## General rules
+
+- Never build in release mode for development. Always build in debug mode.
+- Always cleanup test temporary files that you create after you're done.
+
 ## Stack and layout
 
 - Rust, edition 2024 (toolchain in use: cargo/rustc 1.98).

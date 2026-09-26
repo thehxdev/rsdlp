@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use grammers_client::client::{Client, UpdatesConfiguration};
 use grammers_client::types::update;
-use grammers_client::types::{InputMessage, Update};
+use grammers_client::types::{Attribute, InputMessage, Update};
 use grammers_client::{button, reply_markup};
 use grammers_mtsender::SenderPool;
 use grammers_session::defs::{PeerId, PeerRef};
@@ -224,6 +224,13 @@ impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.path.exists() {
             let _ = std::fs::remove_file(&self.path);
+        }
+        if let Some(parent) = self.path.parent() {
+            if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("rsdlp_job_") {
+                    let _ = std::fs::remove_dir_all(parent);
+                }
+            }
         }
     }
 }
@@ -876,6 +883,285 @@ async fn handle_message(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaMetadata {
+    pub is_video: bool,
+    pub is_audio: bool,
+    pub duration_secs: u64,
+    pub width: i32,
+    pub height: i32,
+    pub mime_type: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+}
+
+pub async fn probe_media(
+    path: &std::path::Path,
+    info: Option<&serde_json::Value>,
+    res: Option<u64>,
+    abr: Option<u64>,
+) -> MediaMetadata {
+    // 1. Try ffprobe for container and stream properties
+    if let Ok(output) = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            path.to_str().unwrap_or_default(),
+        ])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                let streams = parsed.get("streams").and_then(|v| v.as_array());
+                let format = parsed.get("format");
+
+                let mut is_video = false;
+                let mut is_audio = false;
+                let mut width = 0;
+                let mut height = 0;
+                let mut duration_secs = 0u64;
+
+                if let Some(streams) = streams {
+                    for s in streams {
+                        let codec_type = s.get("codec_type").and_then(|v| v.as_str());
+                        if codec_type == Some("video") {
+                            is_video = true;
+                            if width == 0 {
+                                width = s
+                                    .get("width")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0) as i32;
+                            }
+                            if height == 0 {
+                                height = s
+                                    .get("height")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0) as i32;
+                            }
+                            if duration_secs == 0 {
+                                if let Some(d_str) =
+                                    s.get("duration").and_then(|v| v.as_str())
+                                {
+                                    if let Ok(d_float) = d_str.parse::<f64>() {
+                                        duration_secs = d_float as u64;
+                                    }
+                                }
+                            }
+                        } else if codec_type == Some("audio") {
+                            is_audio = true;
+                        }
+                    }
+                }
+
+                if duration_secs == 0 {
+                    if let Some(d_str) =
+                        format.and_then(|f| f.get("duration")).and_then(|v| v.as_str())
+                    {
+                        if let Ok(d_float) = d_str.parse::<f64>() {
+                            duration_secs = d_float as u64;
+                        }
+                    }
+                }
+
+                let title = format
+                    .and_then(|f| f.get("tags"))
+                    .and_then(|t| t.get("title"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let artist = format
+                    .and_then(|f| f.get("tags"))
+                    .and_then(|t| t.get("artist"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let mime_type = match ext.as_str() {
+                    "mp4" | "m4v" => "video/mp4",
+                    "webm" => {
+                        if is_video {
+                            "video/webm"
+                        } else {
+                            "audio/webm"
+                        }
+                    }
+                    "mkv" => "video/x-matroska",
+                    "mp3" => "audio/mpeg",
+                    "m4a" | "aac" => "audio/mp4",
+                    "ogg" | "opus" => "audio/ogg",
+                    "flac" => "audio/flac",
+                    _ => {
+                        if is_video {
+                            "video/mp4"
+                        } else if is_audio {
+                            "audio/mp4"
+                        } else {
+                            "application/octet-stream"
+                        }
+                    }
+                }
+                .to_string();
+
+                return MediaMetadata {
+                    is_video,
+                    is_audio: !is_video && is_audio,
+                    duration_secs,
+                    width,
+                    height,
+                    mime_type,
+                    title,
+                    artist,
+                };
+            }
+        }
+    }
+
+    // 2. Fallback to info JSON from yt-dlp
+    let is_audio_only = (res.is_none() && abr.is_some())
+        || info
+            .and_then(|i| i.get("vcodec"))
+            .and_then(|v| v.as_str())
+            .map(|vc| vc == "none")
+            .unwrap_or(false);
+
+    let is_video = !is_audio_only;
+    let is_audio = is_audio_only;
+
+    let duration_secs = info
+        .and_then(|i| i.get("duration"))
+        .and_then(|v| v.as_f64())
+        .map(|d| d as u64)
+        .unwrap_or(0);
+
+    let width = info
+        .and_then(|i| i.get("width"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let height = info
+        .and_then(|i| i.get("height"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let title = info
+        .and_then(|i| i.get("title"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let artist = info
+        .and_then(|i| i.get("artist").or_else(|| i.get("uploader")))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime_type = match ext.as_str() {
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "webm" => {
+            if is_video {
+                "video/webm"
+            } else {
+                "audio/webm"
+            }
+        }
+        _ => {
+            if is_video {
+                "video/mp4"
+            } else {
+                "audio/mp4"
+            }
+        }
+    }
+    .to_string();
+
+    MediaMetadata {
+        is_video,
+        is_audio,
+        duration_secs,
+        width,
+        height,
+        mime_type,
+        title,
+        artist,
+    }
+}
+
+async fn ensure_faststart(path: &std::path::Path) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext != "mp4" && ext != "m4v" && ext != "mov" {
+        return;
+    }
+    let temp_faststart = path.with_extension("faststart_tmp.mp4");
+    let status = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            path.to_str().unwrap_or_default(),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            temp_faststart.to_str().unwrap_or_default(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if let Ok(st) = status {
+        if st.success() && temp_faststart.exists() {
+            let _ = tokio::fs::rename(&temp_faststart, path).await;
+        } else {
+            let _ = tokio::fs::remove_file(&temp_faststart).await;
+        }
+    }
+}
+
+pub fn build_media_message(
+    uploaded: grammers_client::types::media::Uploaded,
+    caption: String,
+    meta: &MediaMetadata,
+) -> InputMessage {
+    let mut input_msg = InputMessage::new()
+        .mime_type(&meta.mime_type)
+        .document(uploaded)
+        .text(caption);
+
+    if meta.is_video {
+        input_msg = input_msg.attribute(Attribute::Video {
+            round_message: false,
+            supports_streaming: true,
+            duration: std::time::Duration::from_secs(meta.duration_secs),
+            w: meta.width,
+            h: meta.height,
+        });
+    } else if meta.is_audio {
+        input_msg = input_msg.attribute(Attribute::Audio {
+            duration: std::time::Duration::from_secs(meta.duration_secs),
+            title: meta.title.clone(),
+            performer: meta.artist.clone(),
+        });
+    }
+
+    input_msg
+}
+
 async fn execute_download_and_upload<P: Into<PeerRef>>(
     client: &Client,
     peer: P,
@@ -912,19 +1198,19 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
         }
     };
 
-    let filename = match ytdlp.get_info().await {
-        Ok(Some(info)) => ytdlp::extract_filename(&info),
-        _ => "video.mp4".to_string(),
+    let (info_val, filename) = match ytdlp.get_info().await {
+        Ok(Some(info)) => {
+            let fn_str = ytdlp::extract_filename(&info);
+            (Some(info), fn_str)
+        }
+        _ => (None, "video.mp4".to_string()),
     };
 
     let id = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let safe_filename = filename.replace(['/', '\\', '\0'], "_");
-    let temp_path = staging_dir.join(format!(
-        "rsdlp_{}_{}_{}",
-        std::process::id(),
-        id,
-        safe_filename
-    ));
+    let job_dir = staging_dir.join(format!("rsdlp_job_{}_{}", std::process::id(), id));
+    let _ = tokio::fs::create_dir_all(&job_dir).await;
+    let temp_path = job_dir.join(&safe_filename);
     let guard = TempFileGuard::new(temp_path);
 
     let download_res = async {
@@ -952,6 +1238,9 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
         return Ok(());
     }
 
+    ensure_faststart(guard.path()).await;
+    let meta = probe_media(guard.path(), info_val.as_ref(), res, abr).await;
+
     let uploading_msg = InputMessage::new()
         .text(format!("📤 [2/2] Uploading {} to Telegram...", pending.title))
         .reply_markup(&cancel_markup());
@@ -964,7 +1253,7 @@ async fn execute_download_and_upload<P: Into<PeerRef>>(
     match upload_res {
         Ok(uploaded) => {
             let caption = format!("🎬 {}\nQuality: {desc}", pending.title);
-            let input_file = InputMessage::new().file(uploaded).text(caption);
+            let input_file = build_media_message(uploaded, caption, &meta);
             client.send_message(peer_ref, input_file).await?;
             let _ = client.delete_messages(peer_ref, &[status_msg_id]).await;
         }
@@ -1142,6 +1431,75 @@ mod tests {
 
         // Different callback query 1000 -> returns true
         assert!(state.mark_callback_seen(1000).await);
+    }
+
+    #[tokio::test]
+    async fn test_probe_media_fallback() {
+        let dummy_path = std::path::Path::new("dummy_video.mp4");
+        let video_info = serde_json::json!({
+            "duration": 120.5,
+            "width": 1920,
+            "height": 1080,
+            "title": "Sample Video",
+            "uploader": "Test Channel"
+        });
+        let meta = probe_media(dummy_path, Some(&video_info), Some(1080), None).await;
+        assert!(meta.is_video);
+        assert!(!meta.is_audio);
+        assert_eq!(meta.duration_secs, 120);
+        assert_eq!(meta.width, 1920);
+        assert_eq!(meta.height, 1080);
+        assert_eq!(meta.mime_type, "video/mp4");
+        assert_eq!(meta.title.as_deref(), Some("Sample Video"));
+        assert_eq!(meta.artist.as_deref(), Some("Test Channel"));
+
+        let dummy_audio_path = std::path::Path::new("dummy_song.mp3");
+        let audio_info = serde_json::json!({
+            "duration": 45.0,
+            "vcodec": "none",
+            "title": "Sample Song",
+            "artist": "Sample Artist"
+        });
+        let audio_meta = probe_media(dummy_audio_path, Some(&audio_info), None, Some(128)).await;
+        assert!(!audio_meta.is_video);
+        assert!(audio_meta.is_audio);
+        assert_eq!(audio_meta.duration_secs, 45);
+        assert_eq!(audio_meta.mime_type, "audio/mpeg");
+        assert_eq!(audio_meta.title.as_deref(), Some("Sample Song"));
+        assert_eq!(audio_meta.artist.as_deref(), Some("Sample Artist"));
+    }
+
+    #[tokio::test]
+    async fn test_probe_media_ffprobe_and_faststart() {
+        let test_file = std::env::temp_dir().join(format!("rsdlp_test_probe_{}.mp4", std::process::id()));
+        let status = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=640x360:rate=30",
+                "-c:v",
+                "libx264",
+                test_file.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+
+        if let Ok(st) = status {
+            if st.success() {
+                ensure_faststart(&test_file).await;
+                let meta = probe_media(&test_file, None, None, None).await;
+                assert!(meta.is_video);
+                assert!(!meta.is_audio);
+                assert_eq!(meta.width, 640);
+                assert_eq!(meta.height, 360);
+                assert_eq!(meta.mime_type, "video/mp4");
+                let _ = std::fs::remove_file(&test_file);
+            }
+        }
     }
 
     #[tokio::test]

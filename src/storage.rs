@@ -39,7 +39,11 @@ impl StorageManager {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("rsdlp_") {
-                    if let Ok(()) = fs::remove_file(&path) {
+                    if path.is_dir() {
+                        if let Ok(()) = fs::remove_dir_all(&path) {
+                            pruned += 1;
+                        }
+                    } else if let Ok(()) = fs::remove_file(&path) {
                         pruned += 1;
                     }
                 }
